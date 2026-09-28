@@ -193,6 +193,7 @@ function tipLoad(args) {
   ok('§4.5 root transform tilted', (() => { const m = { e: null, set(...a) { this.e = a; return this; } }; s.rootTransform(m); return Math.abs(m.e[5]) < 0.99; })());
   for (let k = 0; k < 120 * 10 && !s.resting; k++) s.update(DT, s.bodiesWorld(bodies), F, head, sup);
   ok('§4.5 overturned machine comes to rest', s.resting && s.phi > 30 * DEG, `${(s.phi / DEG).toFixed(1)}°`);
+  ok('OVERTURNED: no stale stability margin (HUD —)', Number.isNaN(s.margin), `${s.margin}`);
 
   // recovery: tip starts, the load lands once φ > 1° (rope slack) → falls back, slam
   const r = statics({ cw: 35000, L: 52, R: 30, psi: Math.PI, P: 9.0, sup, steps: 1 });
@@ -280,6 +281,41 @@ function tipLoad(args) {
   ok('bare pad punch-through', ev.some((e) => e.type === 'punch') && ev.some((e) => e.type === 'punchCritical'));
   near('punch-through stops at 0.40 m', st.s[0], 0.40, 1e-9);
   ok('settle KPI events 20 / 50 mm', ev.some((e) => e.type === 'settle' && e.mm === 20) && ev.some((e) => e.type === 'settle' && e.mm === 50));
+  // below ultimate the float consolidates to a finite settlement instead of sinking forever:
+  // bare pad on P1 hardcore (400 kPa), 713 kPa → s∞ = 0.05·(713/400 − 1) ≈ 39 mm
+  const s3 = new Settlement(), p1 = [0, 1, 2, 3].map(() => ({ x: 57, z: -11 })), Rb = 713 * 0.242 * 1000;
+  for (let k = 0; k < 20 * 120; k++) s3.update(DT, [Rb, Rb, Rb, Rb], [0.242, 0.242, 0.242, 0.242], p1);
+  const s20 = s3.s[0];
+  for (let k = 0; k < 280 * 120; k++) s3.update(DT, [Rb, Rb, Rb, Rb], [0.242, 0.242, 0.242, 0.242], p1);
+  ok('settles, then stabilises (no punch-through below ultimate)', !s3.punched && s20 > 0.02 && s3.s[0] - s20 < 0.02, `${s20} → ${s3.s[0]}`);
+  near('settlement levels off at s∞ (m)', s3.s[0], 0.05 * (713 / 400 - 1), 1e-4);
+}
+
+// ---------------------------------------------------------------- FLOAT_LIGHT (§4.4)
+{
+  // An in-chart lift over a CORNER unloads the diagonal float alone (the §4.3 ψ = 135° case: FR 0.0 t
+  // at 100 % of the chart) — not a tipping precursor. Over the side an EDGE goes light before tipping.
+  // floats set unloaded first (as in play), then the load goes on the hook
+  const sup = floatSupports(), run = (psi, P) => {
+    const th = Math.acos((20 + 2) / 22.7), st = new Stability(), hd = { x: 0, y: 0, z: 0 };
+    st.setCarrier(0, 0, 0);
+    fillBodies(bodies, { psi: psi * DEG, theta: th, L: 22.7, cwKg: 35000 });
+    const hc = headCarrier(psi * DEG, th, 22.7);
+    for (let k = 0; k < 300 && !st.tipping; k++) {
+      const F = { x: 0, y: k < 120 ? 0 : -P * 1000 * G, z: 0 }, bw = st.bodiesWorld(bodies);
+      st.carrierPoint(hc.x, hc.y, hc.z, hd, false);
+      st.update(DT, bw, F, hd, sup);
+    }
+    return st;
+  };
+  const corner = run(135, 12.8);
+  ok('corner lift at 100 %: diagonal float ~0 t', t(corner.floatR[1]) < 0.5, `${t(corner.floatR[1])}`);
+  ok('corner lift at 100 %: no OUTRIGGER LIGHT', corner.state === 'STABLE' && !corner.floatLight.some(Boolean), `${corner.state} ${corner.floatLight}`);
+  const tipSide = tipLoad({ cw: 35000, L: 22.7, R: 20, psi: 90 * DEG, sup });
+  const side = run(90, 0.92 * tipSide);
+  ok('side lift near tipping: far edge light', side.state === 'FLOAT_LIGHT' && side.floatLight[1] && side.floatLight[3] && !side.floatLight[0], `${side.state} ${side.floatLight} edge ${side.edgeReserve}`);
+  const sideOk = run(90, 12.8);
+  ok('side lift at 100 %: no OUTRIGGER LIGHT', !sideOk.floatLight.some(Boolean), `edge ${sideOk.edgeReserve}`);
 }
 
 // ---------------------------------------------------------------- outriggers

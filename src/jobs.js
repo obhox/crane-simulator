@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Box } from './physics/collide.js';
+import { Box, obbXZ } from './physics/collide.js';
 import { SITE } from './config.js';
 import { CW_DECK, carrierToWorld } from './mobile/config.js';
 import {
@@ -131,6 +131,21 @@ export const JOBS = [...TOWER_JOBS.map((j) => ({ machine: 'tower', ...j })), ...
 const markerMat = new THREE.MeshBasicMaterial({ color: 0x33ff88, transparent: true, opacity: 0.25, depthWrite: false });
 const lineMat = new THREE.LineBasicMaterial({ color: 0x3dff8e });
 const beamMat = new THREE.MeshBasicMaterial({ color: 0x3dff8e, transparent: true, opacity: 0.12, depthWrite: false, side: THREE.DoubleSide });
+const hoverMat = new THREE.MeshBasicMaterial({ color: 0x3dff8e, wireframe: true, transparent: true, opacity: 0.5 });
+const barrelGeo = new THREE.CylinderGeometry(0.28, 0.28, 0.9, 16);
+const barrelMat = new THREE.MeshStandardMaterial({ color: 0x1f5fb0, roughness: 0.5, metalness: 0.3 });
+const gatePoleGeo = new THREE.CylinderGeometry(0.12, 0.12, 4, 10);
+const gateMat = new THREE.MeshStandardMaterial({ color: 0xff5a1f, roughness: 0.5 });
+// module-level geometry / materials are reused by every job and never disposed;
+// everything else a marker, ring or gate creates is disposed with it
+const SHARED = new Set([markerMat, lineMat, beamMat, hoverMat, barrelGeo, barrelMat, gatePoleGeo, gateMat]);
+function disposeTree(root) {
+  root.traverse((o) => {
+    if (o.geometry && !SHARED.has(o.geometry)) o.geometry.dispose();
+    const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+    for (const m of mats) if (!SHARED.has(m)) m.dispose();
+  });
+}
 
 const LEVER_KEYS = ['slew', 'trolley', 'hoist', 'tele', 'luff'];
 const BLOCK_NAMES = { ball: 'hook ball', hb26: '26 t block (3 falls)', hb60: '60 t block (7 falls)', hb90: '90 t block (10 falls)' };
@@ -159,7 +174,26 @@ export class JobRunner {
   }
 
   // helpers used by job setups
-  spawn(type, x, z, yaw, baseY) { return this.sim.spawnLoad(type, x, z, yaw, baseY); }
+  spawn(type, x, z, yaw, baseY) {
+    const l = this.sim.spawnLoad(type, x, z, yaw, baseY);
+    this.checkSpawnOverlap(l);
+    return l;
+  }
+
+  // A load that starts inside a job-prop collider (or another load) is pushed
+  // out violently once it is hooked on: flag it for whoever edits a job setup.
+  checkSpawnOverlap(l) {
+    const b = l && l.box;
+    if (!b) return;
+    const others = [...this.extraColliders, ...(this.sim.world?.boxes || []).filter((o) => o.load && o !== b)];
+    for (const c of others) {
+      if (!c.enabled) continue;
+      const dy = Math.min(b.cy + b.hy, c.cy + c.hy) - Math.max(b.cy - b.hy, c.cy - c.hy);
+      if (dy <= 0.01) continue;
+      const hit = obbXZ(b, c);
+      if (hit && hit.depth > 0.01) console.warn(`[jobs] ${l.type || 'load'} spawned ${hit.depth.toFixed(2)} m inside collider '${c.tag}' — it will be shot out when hooked`);
+    }
+  }
   polar(r, th, y) { return { x: r * Math.cos(th), y, z: -r * Math.sin(th) }; }
   // world target on the ground at (x, z) (mobile jobs work in world coordinates)
   place(x, z, y = null) { return { x, y: y ?? this.groundY(x, z), z, yaw: null }; }
@@ -198,12 +232,10 @@ export class JobRunner {
 
   barrelRing(x, z, radius) {
     const posts = [];
-    const geo = new THREE.CylinderGeometry(0.28, 0.28, 0.9, 16);
-    const mat = new THREE.MeshStandardMaterial({ color: 0x1f5fb0, roughness: 0.5, metalness: 0.3 });
     for (let i = 0; i < 8; i++) {
       const a = (i / 8) * Math.PI * 2;
       const px = x + Math.cos(a) * (radius + 0.28), pz = z + Math.sin(a) * (radius + 0.28);
-      const m = new THREE.Mesh(geo, mat);
+      const m = new THREE.Mesh(barrelGeo, barrelMat);
       m.position.set(px, 0.45, pz);
       m.castShadow = m.receiveShadow = true;
       this.group.add(m);
@@ -216,11 +248,10 @@ export class JobRunner {
   }
 
   gate(x, z, px, pz, half) {
-    const mat = new THREE.MeshStandardMaterial({ color: 0xff5a1f, roughness: 0.5 });
-    const geo = new THREE.CylinderGeometry(0.12, 0.12, 4, 10);
+    const mat = gateMat;
     for (const s of [-1, 1]) {
       const gx = x + px * half * s, gz = z + pz * half * s;
-      const m = new THREE.Mesh(geo, mat);
+      const m = new THREE.Mesh(gatePoleGeo, mat);
       m.position.set(gx, 2, gz);
       m.castShadow = true;
       this.group.add(m);
@@ -237,13 +268,16 @@ export class JobRunner {
   clearMarkers() {
     for (const c of this.extraColliders) this.sim.world.remove(c);
     this.extraColliders = [];
-    for (const p of this.props) p.dispose();
+    // props own their geometry (site materials are shared): detach them first,
+    // then free the markers, rings, barrels and gates that are left
+    for (const p of this.props) { p.root.removeFromParent(); p.dispose(); }
     this.props = [];
     if (this.zonesUsed) {
       const g = this.sim.ground || groundApi();
       if (g && typeof g.clearZones === 'function') g.clearZones();
       this.zonesUsed = false;
     }
+    disposeTree(this.group);
     this.group.clear();
     this.setChecklist(null);
   }
@@ -253,6 +287,7 @@ export class JobRunner {
     const [sx, sy, sz] = load.def.size;
     const box = new THREE.BoxGeometry(sx + 0.1, sy, sz + 0.1);
     const edges = new THREE.LineSegments(new THREE.EdgesGeometry(box), lineMat);
+    box.dispose(); // only the edges are drawn
     edges.position.y = sy / 2;
     g.add(edges);
     const pad = new THREE.Mesh(new THREE.PlaneGeometry(sx + t.tol * 2, sz + t.tol * 2), markerMat);
@@ -290,7 +325,7 @@ export class JobRunner {
   }
 
   addHoverMarker(p, tol) {
-    const m = new THREE.Mesh(new THREE.SphereGeometry(tol, 20, 14), new THREE.MeshBasicMaterial({ color: 0x3dff8e, wireframe: true, transparent: true, opacity: 0.5 }));
+    const m = new THREE.Mesh(new THREE.SphereGeometry(tol, 20, 14), hoverMat);
     m.position.set(p.x, p.y, p.z);
     this.group.add(m);
     const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, p.y, 10, 1, true), beamMat);
@@ -334,6 +369,7 @@ export class JobRunner {
       time: 0, maxSway: 0, collisions: 0, rough: 0, twoBlock: 0, lmiTrips: 0,
       hornFirst: null, testLifts: 0, liftsNeeded: 0, placeErr: [], windExposure: 0,
       assist: false, maxHeightErr: 0, lateralErr: 0,
+      hookImpacts: 0, misplaced: 0, hadLoad: false, // mobile rows
     };
     this.steps.forEach((s, i) => { s.needsTestLift = i > 0 && this.steps[i - 1].kind === 'attach'; });
     this.kpi.liftsNeeded = this.steps.filter((s) => s.needsTestLift).length;
@@ -360,7 +396,7 @@ export class JobRunner {
 
   nextStep() {
     this.stepIndex++;
-    this.group.children.filter((c) => c.userData.stepMarker).forEach((c) => this.group.remove(c));
+    this.group.children.filter((c) => c.userData.stepMarker).forEach((c) => { this.group.remove(c); disposeTree(c); });
     this.setChecklist(null);
     this.sim.hud.progress(null);
     const s = this.step;
@@ -386,10 +422,24 @@ export class JobRunner {
     if (!this.job) return;
     const s = this.step;
     const isTargetLanding = s && s.kind === 'deliver' && ev.kind === 'land';
+    if (ev.kind === 'hook' && this.isMobile) { this.onHookImpactMobile(ev); return; }
     if (ev.kind === 'side' && ev.speed > 0.25) { this.kpi.collisions++; this.sim.hud.toast(`Collision (${ev.tag || 'object'})`, 'bad'); }
     else if (ev.kind === 'land' && ev.speed > 0.45) { this.kpi.rough++; this.sim.hud.toast('Rough landing', 'warn'); }
     else if (ev.kind === 'hook' && ev.speed > 0.8) { this.kpi.collisions++; this.sim.hud.toast('Hook block impact', 'bad'); }
     void isTargetLanding;
+  }
+
+  // Mobile: hook-block knocks are their own, capped KPI row (not load
+  // collisions). Setting the empty hook down on the ground (tag null) is part
+  // of the work (M3 reeving) and only counts when it is slammed down near full
+  // lowering speed (hook ball ≈ 2.2 m/s on one fall).
+  onHookImpactMobile(ev) {
+    const empty = !this.sim.machine?.hoist?.load;
+    const onGround = !ev.tag;
+    const limit = empty && onGround ? 1.5 : 0.8;
+    if (ev.speed <= limit) return;
+    this.kpi.hookImpacts++;
+    this.sim.hud.toast(onGround ? 'Hook block set down hard — slow down before the ground' : `Hook block impact (${ev.tag})`, 'warn');
   }
 
   onRelease(load) {
@@ -427,7 +477,9 @@ export class JobRunner {
       this.sim.hud.toast(`Released outside the target (${why}). Re-attach and place it correctly.`, 'bad');
       this.sim.audio.chime(false);
       s.state.misplaced = (s.state.misplaced || 0) + 1;
-      this.kpi.placeErr.push(1.5);
+      // mobile: a misplaced release is its own row; the accuracy row averages the real placements
+      if (this.isMobile) this.kpi.misplaced++;
+      else this.kpi.placeErr.push(1.5);
     }
   }
 
@@ -460,6 +512,7 @@ export class JobRunner {
     this.kpi.twoBlock = c.twoBlockCount - this.base2b;
     this.kpi.lmiTrips = c.lmiTrips - this.baseLmi;
     const suspended = hoist.load && !hoist.loadGrounded;
+    if (hoist.load) this.kpi.hadLoad = true;
     if (suspended) {
       this.kpi.maxSway = Math.max(this.kpi.maxSway, THREE.MathUtils.radToDeg(hoist.swingAngle));
       if (sim.wind.anemometer > hoist.load.def.windLimit) this.kpi.windExposure += dt;
@@ -601,7 +654,8 @@ export class JobRunner {
   }
 
   completeDeck(load) {
-    this.sim.hud.toast(`${load.def.name.replace(/\s[\d.]+ t$/, '')} is on the carrier deck`, 'good');
+    // the machine already toasts an absorbed slab (with the next instruction); only chime then
+    if (!load.absorbed) this.sim.hud.toast(`${load.def.name.replace(/\s[\d.]+ t$/, '')} is on the carrier deck`, 'good');
     this.sim.audio.chime(true);
     this.nextStep();
   }
@@ -675,7 +729,12 @@ export class JobRunner {
     const v = this.mv;
     if (!v) return;
     const st = s.state, hud = this.sim.hud;
-    const done = (msg) => { hud.toast(msg, 'good'); this.sim.audio.chime(true); this.nextStep(); };
+    // silent = the machine toasted this very event already (raise, reeve, RCL confirm): chime only
+    const done = (msg, silent = false) => { if (!silent) hud.toast(msg, 'good'); this.sim.audio.chime(true); this.nextStep(); };
+    // state-change bookkeeping: did the condition flip while this step was active?
+    const rclKey = v.rcl ? `${v.rcl.mode}|${v.rcl.base}|${v.rcl.cwKg}|${v.rcl.block}|${v.rcl.confirmed}` : '';
+    const rclChanged = st.rclKey !== undefined && st.rclKey !== rclKey;
+    st.rclKey = rclKey;
     switch (s.kind) {
       case 'drive': {
         const d = Math.hypot(v.pos.x - s.target.x, v.pos.z - s.target.z);
@@ -710,14 +769,20 @@ export class JobRunner {
       }
       case 'ballast':
         if (v.ballastProgress !== null && v.ballastProgress > 0 && v.ballastProgress < 1) hud.progress(v.ballastProgress);
-        if (v.cwKg >= s.cwKg - 1) done(`Counterweight ${(v.cwKg / 1000).toFixed(1)} t on the superstructure`);
+        // raised during this step → the machine toasted "Counterweight … on the superstructure — unpin …"
+        if (v.cwKg >= s.cwKg - 1) done(`Counterweight ${(v.cwKg / 1000).toFixed(1)} t on the superstructure`, !!st.unmet);
+        else st.unmet = true;
         break;
       case 'reeve':
         if (v.reeving && v.reeveProgress !== null) hud.progress(v.reeveProgress);
-        if (v.block === s.block && !v.reeving) done(`Reeved: ${BLOCK_NAMES[s.block] || s.block}`);
+        // riggers finished during this step → the machine toasted "Reeved: … — confirm the RCL configuration (L)"
+        if (v.block === s.block && !v.reeving) done(`Reeved: ${BLOCK_NAMES[s.block] || s.block}`, !!st.unmet);
+        else st.unmet = true;
         break;
       case 'config':
-        if (configMatches(v)) done(`RCL configuration matches the crane: ${rclCode(v.rcl)}`);
+        // matched by a confirm this frame → the machine toasted "RCL configuration confirmed: …";
+        // matched because the crane changed to fit an earlier confirm → say so here
+        if (configMatches(v)) done(`RCL configuration matches the crane: ${rclCode(v.rcl)}`, rclChanged);
         break;
       case 'boom':
         hud.progress(THREE.MathUtils.clamp((v.boomLen - 11.5) / Math.max(0.1, s.length - 11.5), 0, 1));
@@ -779,15 +844,23 @@ export class JobRunner {
     const add = (label, value, pts, note) => items.push({ label, value, pts, note });
     const over = Math.max(0, k.time - job.par);
     add('Execution time', `${fmtTime(k.time)} (par ${fmtTime(job.par)})`, -Math.min(20, Math.floor(over / 5)));
-    add('Max load sway', `${k.maxSway.toFixed(1)}°`, -Math.min(15, Math.max(0, Math.round((k.maxSway - 2.5) * 2))));
-    add(mob ? 'Load / hook collisions' : 'Collisions', `${k.collisions}`, -8 * k.collisions);
-    add('Rough landings', `${k.rough}`, -5 * k.rough);
-    add('Upper limit (anti two-block) trips', `${k.twoBlock}`, -5 * k.twoBlock);
+    // mobile: load rows only when the job ever had a load on the hook (a drive-only failure has none)
+    const loadRows = !mob || k.hadLoad;
+    if (loadRows) add('Max load sway', `${k.maxSway.toFixed(1)}°`, -Math.min(15, Math.max(0, Math.round((k.maxSway - 2.5) * 2))));
+    if (loadRows || k.collisions) add(mob ? 'Load collisions' : 'Collisions', `${k.collisions}`, -8 * k.collisions);
+    if (mob && k.hookImpacts) add('Hook block impacts', `${k.hookImpacts}`, -Math.min(12, 3 * k.hookImpacts));
+    if (loadRows || k.rough) add('Rough landings', `${k.rough}`, -5 * k.rough);
+    if (loadRows || k.twoBlock) add('Upper limit (anti two-block) trips', `${k.twoBlock}`, -5 * k.twoBlock);
     add(mob ? 'RCL cut-outs (STOP)' : 'LMI cut-outs', `${k.lmiTrips}`, -10 * k.lmiTrips);
     add('Horn before first motion', k.hornFirst ? 'Yes' : 'No', k.hornFirst ? 0 : -5);
-    if (k.liftsNeeded) add('Test lifts', `${k.testLifts}/${k.liftsNeeded}`, -5 * Math.max(0, k.liftsNeeded - k.testLifts));
+    if (k.liftsNeeded && loadRows) add('Test lifts', `${k.testLifts}/${k.liftsNeeded}`, -5 * Math.max(0, k.liftsNeeded - k.testLifts));
     const pe = k.placeErr.length ? k.placeErr.reduce((a, b) => a + b, 0) / k.placeErr.length : 0;
-    add('Placement accuracy', `${Math.round(Math.max(0, 1 - pe) * 100)}% of tolerance`, -Math.round(pe * 10));
+    if (!mob) add('Placement accuracy', `${Math.round(Math.max(0, 1 - pe) * 100)}% of tolerance`, -Math.round(pe * 10));
+    else {
+      // average of the successful placements only; misplaced releases are their own row
+      if (k.placeErr.length) add('Placement accuracy', `${Math.round(Math.max(0, 1 - pe) * 100)}% of tolerance (${k.placeErr.length} placed)`, -Math.round(pe * 10));
+      if (k.misplaced) add('Released outside the target', `${k.misplaced}`, -Math.min(15, 5 * k.misplaced));
+    }
     if (job.id === 'bucket' || job.id === 'zigzag') add('Max height error on path', `${k.maxHeightErr.toFixed(2)} m`, -Math.min(10, Math.round(k.maxHeightErr * 5)));
     if (k.windExposure > 0) add('Time above load wind limit', `${k.windExposure.toFixed(0)} s`, -Math.min(20, Math.round(k.windExposure / 2)));
     if (k.assist) add('Sway Control assist used', 'Yes', 0, 'assisted');

@@ -6,7 +6,7 @@ import { RopeRenderer } from '../machines/ropeRender.js';
 import { NULL_INPUT, makeMobileStart, displaySlewDeg } from '../machines/machine.js';
 import {
   AT100, HOOK_BLOCKS, DRIVES, CAMERA_MODES, MODE_PROFILE, FLOATS, VEHICLE, CW_DECK, TOWER_ZONE, MATS, BASES,
-  reeveTime,
+  PINNED_LENGTHS, BOOM_CONTACT, SLEW_OVERSPEED, reeveTime,
 } from './config.js';
 import { buildMobileCrane } from './model.js';
 import { buildMobileHookBlock, blockFallPoints } from './hookBlocks.js';
@@ -75,6 +75,8 @@ const WARN_ID = {
 const CONTACT_LOCK = 0.5;
 const CONTACT_EVERY = 3; // steps between boom-contact sweeps (40 Hz)
 const WINCH_SLIP = 1.6 * AT100.hoist.linePullN; // N per fall: winch holding brake slips [E]
+// boom colliders: one yawed box per boom-contact sample interval (1 m), enough for the longest boom
+const BOOM_BOXES = Math.ceil(PINNED_LENGTHS[PINNED_LENGTHS.length - 1] / BOOM_CONTACT.sample) + 1;
 
 const _v = new THREE.Vector3();
 const _w = new THREE.Vector3();
@@ -191,12 +193,16 @@ export class MobileMachine {
 
     // own collider boxes (tag 'mobile': the vehicle, outrigger obstruction and
     // boom-contact tests skip them): chassis, rear ballast deck (slabs land on
-    // it), driver cab, superstructure
+    // it), driver cab, superstructure; then the telescopic boom (tag 'mobileBoom',
+    // see _updateColliders) for the other machine's hook and load
+    this.boomColliders = Array.from({ length: BOOM_BOXES }, () => new Box(0, -50, 0, 0.5, 0.5, 0.5, 0, 'mobileBoom'));
     this.colliders = [
       new Box(0, 0, 0, 1, 1, 1, 0, 'mobile'), new Box(0, 0, 0, 1, 1, 1, 0, 'mobile'),
       new Box(0, 0, 0, 1, 1, 1, 0, 'mobile'), new Box(0, 0, 0, 1, 1, 1, 0, 'mobile'),
+      ...this.boomColliders,
     ];
     this._ignore = new Set(this.colliders);
+    this._bsamp = [];
     this.reset(makeMobileStart(ctx.settings?.mobileStart === 'road' ? 'road' : 'pad'));
   }
 
@@ -217,6 +223,12 @@ export class MobileMachine {
     return !(this.hoist.load && !this.hoist.loadGrounded);
   }
   canPark() {
+    const v = this.vehicle, o = this.outr;
+    // nobody leaves a rolling carrier: stopped and secured first (it would coast on driverless)
+    if (this.mode === 'ROAD' && (!v.standstill || !v.parkingBrake)) return { ok: false, reason: 'Stop and apply the parking brake (F) first' };
+    if (this.mode === 'SETUP' && (o.beamSpeed > 1e-3 || o.jackSpeed > 1e-3 || o.levelState === 'running')) {
+      return { ok: false, reason: 'Finish the outrigger motion first' };
+    }
     return this.hoist.load && !this.hoist.loadGrounded ? { ok: false, reason: 'Land the load first' } : { ok: true };
   }
   park() { this.parked = true; this.power = false; this.route.setVisible(false); }
@@ -361,6 +373,8 @@ export class MobileMachine {
     this._updateColliders();
     this.route.setVisible(false);
     this._hsT = -1;
+    this._guideAt = -1;
+    this._slewOverT = 0; this._slewToastT = -Infinity; this.slewOverspeed = false;
   }
 
   // static solve of the carrier on its outriggers / tyres after a reset
@@ -583,6 +597,9 @@ export class MobileMachine {
   }
 
   _hookAction(toast) {
+    // driving / at the outrigger remote nobody is at the hook: consume the press, so the host's
+    // generic hook-on never ties a load to the block stowed on the bumper
+    if (this.mode === 'ROAD' || this.mode === 'SETUP') { toast('Hook: operate from the crane cab', 'info'); return true; }
     if (this.mode !== 'CRANE') return false;
     const hoist = this.hoist, d = this.drives;
     if (this.stowed) {
@@ -686,6 +703,8 @@ export class MobileMachine {
     const ctx = this.ctx, hoist = this.hoist, d = this.drives, stab = this.stab, v = this.vehicle, outr = this.outr;
     const lev = inp.levers || NULL_INPUT.levers;
     this.t += dt;
+    // the boom's own colliders are for the other machine only (back on in _updateColliders)
+    for (const b of this.boomColliders) b.enabled = false;
 
     // ---- 1 mode logic
     if (this.reeving) {
@@ -702,6 +721,11 @@ export class MobileMachine {
       const dr = this._drive, di = inp.drive || NULL_INPUT.drive;
       dr.throttle = di.throttle || 0; dr.brake = di.brake || 0; dr.steer = di.steer || 0;
       dr.crawl = !!(di.crawl || inp.micro);
+      // parked (forced switch): the driver brakes to a stop and sets the parking brake
+      if (this.parked) {
+        dr.throttle = 0; dr.brake = 1; dr.steer = 0;
+        if (v.standstill && !v.parkingBrake) v.parkingBrake = true;
+      }
       const ev = v.update(dt, dr, this.driveActs, {
         terrain: ctx.terrain, world: ctx.world, traffic: ctx.streets?.traffic, limitKmh: ctx.settings?.siteSpeedLimit ?? 10,
       });
@@ -867,6 +891,7 @@ export class MobileMachine {
     this._boomContact(dt);
     this._rclEvents(dt);
     this._episodes(dt);
+    this._slewCheck(dt);
     // riggers steady a block just unhooked from the bumper (no free pendulum off the anchor)
     if (this._guideT > 0) {
       this._guideT -= dt;
@@ -970,6 +995,44 @@ export class MobileMachine {
     // superstructure over the slew ring: tail swing 3.84 m
     const cu = -1.1, cs = Math.cos(d.psi), sn = Math.sin(d.psi);
     put(upper, cu * cs, cu * sn, 2.95, 2.75, 0.65, 1.30, yaw + d.psi);
+    this._updateBoomColliders(on);
+  }
+
+  // Telescopic boom for the OTHER machine's hook and load (tower loads used to pass straight
+  // through it): one box per 1 m piece of the §3.7 boom-contact axis (deflected, contact radius
+  // 0.55 → 0.35 m), yawed to the boom azimuth (Box is yaw-only) and sized to the exact bounds of
+  // that inclined piece (section ±r·sinθ along, ±r·cosθ up, ±r across), so the envelope stays
+  // within ~sinθ·1 m of the boom on a steep boom. Switched off while this machine steps (step() →
+  // on again here at the end): its own hook and load hang right under the head, and its
+  // outrigger / vehicle / boom-contact tests skip them (tag 'mobileBoom', this._ignore).
+  _updateBoomColliders(on) {
+    const d = this.drives, stab = this.stab, boxes = this.boomColliders;
+    const pts = boomSamples(d.L, d.theta, d.dv, d.dl, 0, this._bsamp);
+    const n = Math.min(pts.length - 1, boxes.length);
+    const az = this.vehicle.yaw + d.psi, c = Math.cos(az), s = Math.sin(az);
+    const cp = Math.cos(d.psi), sp = Math.sin(d.psi);
+    const L = this._bloc || (this._bloc = []);
+    if (on) {
+      for (let i = 0; i <= n; i++) {
+        const p = pts[i], q = L[i] || (L[i] = { x: 0, y: 0, z: 0, r: 0 });
+        stab.carrierPoint(p.u * cp - p.y * sp, p.u * sp + p.y * cp, p.z, _pb, true);
+        // box-local axes (three.js rotation.y = az): x̂ = (c, −s) along the boom, ẑ = (s, c)
+        q.x = _pb.x * c - _pb.z * s; q.z = _pb.x * s + _pb.z * c; q.y = _pb.y; q.r = p.r;
+      }
+    }
+    for (let j = 0; j < boxes.length; j++) {
+      const box = boxes[j];
+      if (!on || j >= n) { box.enabled = false; continue; }
+      const A = L[j], B = L[j + 1];
+      const dx = B.x - A.x, dy = B.y - A.y, len = Math.hypot(dx, dy) || 1;
+      const r = Math.max(A.r, B.r), rx = r * Math.abs(dy) / len, ry = r * Math.abs(dx) / len;
+      const x0 = Math.min(A.x, B.x) - rx, x1 = Math.max(A.x, B.x) + rx;
+      const y0 = Math.min(A.y, B.y) - ry, y1 = Math.max(A.y, B.y) + ry;
+      const z0 = Math.min(A.z, B.z) - r, z1 = Math.max(A.z, B.z) + r;
+      const lxc = (x0 + x1) / 2, lzc = (z0 + z1) / 2;
+      box.set(lxc * c + lzc * s, (y0 + y1) / 2, -lxc * s + lzc * c, (x1 - x0) / 2, (y1 - y0) / 2, (z1 - z0) / 2, az);
+      box.enabled = true;
+    }
   }
 
   // ------------------------------------------------------------- events
@@ -1084,6 +1147,24 @@ export class MobileMachine {
     if (st.state !== 'LIFTOFF' && st.state !== 'TIPPING' && this._epT > 8) this._liftEp = false;
   }
 
+  // §3.2 slewing faster than recommended for this boom with a real load on (the job KPI's test):
+  // RCL warning 'slewSpeed' while it lasts, one toast per episode (at most every toastEvery s)
+  _slewCheck(dt) {
+    const hoist = this.hoist, d = this.drives, S = SLEW_OVERSPEED;
+    const ratio = Number.isFinite(this.rcl.ratio) ? this.rcl.ratio : 9.99;
+    const rec = slewRecRpm(d.L), rpm = Math.abs(d.slewRpm);
+    const over = !!hoist.load && !hoist.loadGrounded && ratio > S.loadRatio && rpm > rec + S.marginRpm;
+    this.slewOverspeed = over;
+    if (!over) { this._slewOverT = 0; return; }
+    const first = this._slewOverT < S.toastAfter;
+    this._slewOverT += dt;
+    if (first && this._slewOverT >= S.toastAfter && !this.parked && this.t - (this._slewToastT ?? -Infinity) > S.toastEvery) {
+      this._slewToastT = this.t;
+      this._audio.push({ type: 'slewOverspeed' });
+      this.ctx.hud?.toast?.(`SLEW SPEED ${rpm.toFixed(2)} rpm — max ${rec.toFixed(2)} rpm for this boom with a load: ease off (hold Shift for micro)`, 'warn');
+    }
+  }
+
   _rclEvents(dt) {
     const w = this.rcl.warnings, prev = this._prevWarn;
     if (this.rcl.state !== 'off' && this.rcl.state !== 'noconfig' && (w.has('SUPPORT_CONFIG') || w.has('TILT') || w.has('TYRES_NOT_CLEAR'))) this.kpi.mismatchTime += dt;
@@ -1148,13 +1229,26 @@ export class MobileMachine {
     rr.slings(hoist);
     rr.end();
 
-    // route chevrons: while driving the approach (free play road start / M1)
-    const show = !this.parked && this.mode === 'ROAD' && Math.hypot(v.pos.x - 57, v.pos.z + 12) > 1.5 && (v.pos.z < -30 || v.pos.x < 50);
-    this.route.setVisible(show);
-    if (show) {
-      const g = guidance(v.pos, v.yaw, { xRef: v.xRef });
-      this.route.setProgress(g.s);
+    // route chevrons: while driving the approach (free play road start / M1), all the way onto P1
+    const g = this._guide();
+    this.route.setVisible(!!g);
+    if (g) this.route.setProgress(g.s);
+  }
+
+  // Road guidance to P1 (route.js) while driving in ROAD mode, including the final straight onto
+  // the pad (distance / "Slew axis to P1" / "Past P1: reverse" cues); gone once the carrier stands
+  // on the mark with the parking brake on (the drive step is done). Once per sim step.
+  _guide() {
+    if (this._guideAt === this.t) return this._guideG;
+    const v = this.vehicle;
+    let g = null;
+    if (!this.parked && this.mode === 'ROAD') {
+      g = guidance(v.pos, v.yaw, { xRef: v.xRef });
+      if (g.atTarget && v.parkingBrake) g = null;
     }
+    this._guideAt = this.t;
+    this._guideG = g;
+    return g;
   }
 
   // ------------------------------------------------------------- HUD
@@ -1211,16 +1305,15 @@ export class MobileMachine {
     for (const k of rcl.stops) if (k !== 'POWER') stops.add(STOP_ID[k] || k);
     for (const k of rcl.warnings) warns.add(WARN_ID[k] || k);
     if (this._contact) stops.add('boomContact');
+    if (this.slewOverspeed) warns.add('slewSpeed');
     const vs = v.state();
     const onSite = insideFence(v.pos);
     let interlock = null, guide = null;
     if (road) {
       const ti = this._travelCheck();
       interlock = ti.ok ? null : ti.reason;
-      if (!this.parked && (!onSite || v.pos.z < -30 || v.pos.x < 50)) {
-        const g = guidance(v.pos, v.yaw, { xRef: v.xRef });
-        guide = { distance: g.distance, text: g.text, bearingDeg: g.bearingDeg, programHint: g.programHint, atTarget: g.atTarget };
-      }
+      const g = this._guide();
+      if (g) guide = { distance: g.distance, text: g.text, bearingDeg: g.bearingDeg, programHint: g.programHint, atTarget: g.atTarget };
     }
     const superIds = ballast.superSlabs;
     const deckIds = ballast.deckStack.map((s) => s.id);
@@ -1324,7 +1417,10 @@ export class MobileMachine {
       hoist: hookMax > 0 ? this.hoistSpeed / hookMax : 0,
       outrigger: { beam: outr.beamSpeed / AT100.outriggers.beamSpeed, jack: outr.jackSpeed / AT100.outriggers.jackSpeed.extendFree, events: [] },
       rcl: { state: rcl.state, muted: rcl.hornMuted },
-      warnings: { wind: w.has('WIND'), tilt: w.has('TILT'), support: w.has('SUPPORT_CONFIG'), floatLight: w.has('FLOAT_LIGHT'), muted: rcl.mismatchMuted },
+      warnings: {
+        wind: w.has('WIND'), tilt: w.has('TILT'), support: w.has('SUPPORT_CONFIG'), floatLight: w.has('FLOAT_LIGHT'), muted: rcl.mismatchMuted,
+        slewSpeed: !!this.slewOverspeed,
+      },
       reverse: mode === 'ROAD' && v.reverseAlarm, horn: !!host.horn, events,
       active: !!host.active, menu: !!host.menu, cameraMode,
     };

@@ -88,6 +88,17 @@ export class HoistSystem {
     this.load = load;
     load.attached = true;
     load.box.enabled = false;
+    // Safety nets for scripted/reset attaches (the hosts only hook on within
+    // sling reach): resolve the load out of any overlap once, here, so the
+    // de-penetration never turns into velocity on the first step…
+    const lb = load.box;
+    lb.cx = load.pos.x; lb.cy = load.pos.y; lb.cz = load.pos.z;
+    lb.setYaw(load.yaw);
+    this.world.resolve(lb, load.pos.y, lb);
+    load.pos.set(lb.cx, lb.cy, lb.cz);
+    // …and take any over-reach (hook further than the slings reach) up
+    // gently in step() instead of snatching the load at the first substep.
+    load.slingExtra = Math.max(0, load.pos.distanceTo(this.hook) - load.hangLength);
     this.loadPrev.copy(load.pos);
     this.loadVel.set(0, 0, 0);
     load.yawVel = 0;
@@ -96,6 +107,7 @@ export class HoistSystem {
   detach() {
     const load = this.load;
     if (!load) return null;
+    load.slingExtra = 0;
     load.attached = false;
     load.upDir.set(0, 1, 0);
     load.box.enabled = true;
@@ -175,7 +187,7 @@ export class HoistSystem {
         if (load) {
           _n.subVectors(load.pos, this.hook);
           d = _n.length();
-          C = d - load.hangLength;
+          C = d - (load.hangLength + (load.slingExtra || 0));
           if (C > 0 && d > 1e-6) {
             _n.multiplyScalar(1 / d);
             const wh = 1 / this.hookMass, wl = 1 / load.mass;

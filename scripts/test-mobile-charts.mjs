@@ -142,6 +142,31 @@ test('telescopable load, permissible wind, slew recommendation (§2.3.8–9, §3
   assert.equal(C.chartColumn(OR(100, 35000), 11).length, 21);
 });
 
+test('length-keyed tables read the chart label at the geometric pinned lengths (§2.3.8, §3.2)', () => {
+  // pinned lengths are 11.5 + 3.726·k: 15.226, 30.13, 45.034 m are the 15.2 / 30.1 / 45.0 m rows
+  const P = C.PIN_GEOM;
+  assert.equal(C.nominalLength(P[9]), 45.0); assert.equal(C.nominalLength(40), 40, 'between pins: unchanged');
+  assert.equal(C.telescopableLoad(P[9]), 5000, 'T_tel at a pinned 45.034 m');
+  assert.equal(C.slewRecRpm(P[5]), 0.5, 'rec slew at a pinned 30.13 m'); assert.equal(C.slewRecRpm(P[1]), 0.65, 'rec slew at 15.226 m');
+  PINNED_LENGTHS.forEach((L, k) => {
+    assert.equal(C.telescopableLoad(P[k]), C.telescopableLoad(L), `T_tel k ${k}`);
+    assert.equal(C.slewRecRpm(P[k]), C.slewRecRpm(L), `slew k ${k}`); assert.equal(C.windPerm(P[k]), C.windPerm(L), `wind k ${k}`);
+  });
+  // T_tel per stroke: constant over a stroke, keyed by its upper pin; standing on pin k = the stroke below
+  assert.equal(C.segmentTeleLoad(P[6] + 0.02), 5000, '33.9 → 37.6 is a 5 t stroke');
+  assert.equal(C.segmentTeleLoad(P[6]), 8000, 'on the 33.9 pin: the 30.1 → 33.9 stroke');
+  assert.equal(C.segmentTeleLoad(P[9] + 0.02), 3000); assert.equal(C.segmentTeleLoad(24), 8000); assert.equal(C.segmentTeleLoad(12), 12000);
+  assert.deepEqual(C.teleLoads(P[6], 6), { out: 5000, in: 8000 }, 'pinned 33.9: next stroke out, stroke below in');
+  assert.deepEqual(C.teleLoads(P[9], 9), { out: 3000, in: 5000 }, 'pinned 45.0');
+  assert.deepEqual(C.teleLoads(P[3], 3), { out: 8000, in: 12000 }, 'pinned 22.7');
+  assert.deepEqual(C.teleLoads(35, null), { out: 5000, in: 5000 }, 'between pins');
+  // no capacity step 2 cm after leaving a pin: the unpinned cap is the stroke's T_tel from its start
+  const cfg = OR(100, 35000);
+  assert.equal(C.capacity(cfg, P[6] + 0.02, 10, null), 5000, 'start of the stroke');
+  assert.equal(C.capacity(cfg, P[7] - 0.02, 10, null), 5000, 'end of the stroke');
+  assert.equal(C.lookup(cfg, P[6] + 0.02, 10, null).teleKg, 5000);
+});
+
 // ------------------------------------------------------------------- boom
 test('luff cylinder geometry and rates (§3.3)', () => {
   near(B.cylLen(0), 2.287, 0.001, 'c(0)');

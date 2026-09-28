@@ -271,10 +271,93 @@ test('slew drive: speed control, 0.8·τ_max release, holding brake, pin, free s
   e.setTurntablePin(false); assert.ok(e.setFreeSlew(true).ok);
   for (let i = 0; i < 120; i++) e.update(dt, { slew: 0 }, perm, { ...ctx, inertia: 5e5, extTorque: 5e4 });
   assert.ok(e.psiDot > 0.05 && !e.brakeSlew, 'free slew follows the external torque');
-  // perm scales the lever
+  // perm scales the lever (10 s: the speed-up ramp takes ≈ 4 s at 11.5 m)
   const f = new MobileDrives({ k: 0 }); f.reset({ theta: 0.5 });
-  for (let i = 0; i < 600; i++) f.update(dt, { slew: 1 }, { slewL: 1, slewR: 0.5 }, { ...ctx, inertia: 5e5 });
+  for (let i = 0; i < 1200; i++) f.update(dt, { slew: 1 }, { slewL: 1, slewR: 0.5 }, { ...ctx, inertia: 5e5 });
   near(f.psiDot, -0.5 * DRIVES.slew.maxSpeed, 0.002, 'slewR perm 0.5');
+});
+
+test('slew speed-up ramp and lateral damping: a long boom does not ring after a slew (§3.2, §3.6)', () => {
+  const th = thetaForRadius(52, 30), perm = { slewL: 1, slewR: 1 }, ctx = { powered: true, inertia: 3.4e6, extTorque: 0, tension: 2452 };
+  const d = new MobileDrives({ k: 11 }); d.reset({ theta: th, ropeLen: 20, falls: 1, blockHeight: 1 });
+  let peakStart = 0, tFull = null;
+  for (let i = 0; i < 14 * 120; i++) {
+    d.update(dt, { slew: -1 }, perm, ctx);
+    peakStart = Math.max(peakStart, Math.abs(d.dl));
+    if (tFull === null && d.psiDot > 0.95 * DRIVES.slew.maxSpeed) tFull = i * dt;
+  }
+  assert.ok(tFull > 6 && tFull < 11, `52 m: ≈ 8 s to full speed (${tFull})`);
+  assert.ok(peakStart < 0.3, `start: lateral head deflection ${peakStart.toFixed(3)} m < 0.3 m`);
+  near(d.psiDot, DRIVES.slew.maxSpeed, 0.002, 'reaches 2 rpm');
+  let tail = 0;
+  for (let i = 0; i < 20 * 120; i++) { d.update(dt, { slew: 0 }, perm, ctx); if (i * dt > 15) tail = Math.max(tail, Math.abs(d.dl)); }
+  assert.ok(tail < 0.05, `rings down after the stop: |δl| ${tail.toFixed(3)} m 15–20 s after release (was ≈ 0.25 m at ζ 2 %)`);
+  // short boom: the ramp is ≈ 4 s, and slowing down is not ramped (0.8·τ_max release unchanged, see above)
+  const s = new MobileDrives({ k: 0 }); s.reset({ theta: 0.5 });
+  let t5 = null;
+  for (let i = 0; i < 8 * 120; i++) { s.update(dt, { slew: 1 }, perm, { ...ctx, inertia: 5.1e5 }); if (t5 === null && -s.psiDot > 0.95 * DRIVES.slew.maxSpeed) t5 = i * dt; }
+  assert.ok(t5 > 3.5 && t5 < 6.5, `11.5 m: ${t5} s to full speed`);
+});
+
+test('telescopable load per stroke: never unpins over the limit, always retracts (§2.3.8, §3.4)', () => {
+  const PIN = [11.5, 15.226, 18.952, 22.678, 26.404, 30.13, 33.856, 37.582, 41.308, 45.034, 48.76, 52.0];
+  const at = (L, pinnedK, grossKg, tele = 0) => snapAt({ L, R: 10, pinnedK, grossKg, loadAttached: true, loadGrounded: false, levers: { tele } });
+  const r = armed({ ...CFG, block: 'hb26' });
+  // pinned 33.9 m, 5.25 t gross: the next stroke (33.9 → 37.6 m) is a 5 t stroke → no unpinning; the
+  // stroke below (30.1 → 33.9) is an 8 t stroke → tele-in free
+  r.update(dt, at(PIN[6], 6, 5250));
+  expectPerm(r, { teleOut: 0, teleIn: 1, hoistUp: 1, luffDown: 1 }, 'pinned 33.9 / 5.25 t');
+  assert.ok(!r.stops.has('TELE_LOAD'), 'no TELE stop while the lever is neutral');
+  assert.equal(r.state, 'ok'); near(r.info.teleOutKg, 5000, 0, 'T_tel out'); near(r.info.teleInKg, 8000, 0, 'T_tel in');
+  r.update(dt, at(PIN[6], 6, 5250, 1)); assert.ok(r.stops.has('TELE_LOAD'), 'TELE stop when tele-out is requested');
+  r.update(dt, at(PIN[6], 6, 5250, -1)); assert.ok(!r.stops.has('TELE_LOAD'), 'tele-in is allowed');
+  r.update(dt, at(PIN[6], 6, 4900)); expectPerm(r, { teleOut: 1, teleIn: 1 }, '4.9 t may telescope out');
+  // pinned 45.0 m (geometric 45.034): the M2 HVAC (3.45 t) may retract (5 t stroke), not extend (3 t)
+  r.update(dt, at(PIN[9], 9, 3450)); expectPerm(r, { teleOut: 0, teleIn: 1 }, 'pinned 45.0 / 3.45 t'); assert.ok(!r.stops.has('TELE_LOAD'));
+  // between pins with a load over the stroke's T_tel (picked up while unpinned): tele-out stops, the
+  // boom can always go back in to the lower pin; the capacity uses the stroke's T_tel (5 t)
+  r.update(dt, at(33.92, null, 5250)); expectPerm(r, { teleOut: 0, teleIn: 1 }, 'unpinned 33.92 / 5.25 t');
+  assert.ok(r.stops.has('TELE_LOAD')); near(r.capKg, 5000, 1e-6, 'unpinned cap = T_tel of the 33.9 → 37.6 stroke');
+  // standing on the pin during the 4 s pin event: the stroke below (no capacity step at the pin)
+  r.update(dt, at(PIN[6], null, 5250)); near(r.info.teleKg, 8000, 0, 'pinning at 33.9: T_tel of the stroke below');
+
+  // closed loop (the reviewer's repro): 5.25 t, 68°, hold tele-out from 22.7 m → pins at 26.4, 30.1,
+  // 33.9 and STAYS pinned there (no LMB STOP, no lock); tele-in then retracts
+  const d = new MobileDrives({ k: 3 }), q = armed({ ...CFG, block: 'ball' }), th = 68 * DEG;
+  d.reset({ theta: th, ropeLen: 17, falls: 1, blockHeight: 1.0 });
+  const step = (tele) => {
+    const L = d.L, R = -2 + L * Math.cos(th);
+    q.update(dt, snapAt({ L, R, pinnedK: d.boom.k, grossKg: 5250, loadAttached: true, loadGrounded: false, levers: { tele }, thetaG: th, luffDeg: 68 }));
+    d.update(dt, { tele }, q.perm, { tension: 5250 * G, util: q.ratio });
+  };
+  const pins = [];
+  for (let i = 0; i < 200 * 120; i++) { const k0 = d.boom.k; step(1); if (d.boom.k !== k0 && d.boom.k !== null) pins.push(d.boom.k); }
+  assert.deepEqual(pins, [4, 5, 6], `pinned sequence ${pins}`);
+  assert.equal(d.boom.phase, 'pinned'); near(d.L, PIN[6], 1e-9, 'stays pinned at 33.9 m');
+  assert.equal(q.counters.lmiTrips, 0, 'no LMB STOP'); assert.ok(q.stops.has('TELE_LOAD') && !q.stops.has('LMB'));
+  for (let i = 0; i < 10 * 120; i++) step(-1);
+  assert.ok(d.L < PIN[6] - 1, `tele-in retracts (${d.L.toFixed(2)} m)`);
+});
+
+test('telescoping into the hook limit: soft stop, not an anti-two-block trip (§3.4, §5.2)', () => {
+  const r = armed();
+  r.update(dt, snapAt({ twoBlock: false, levers: { tele: 1 } }));
+  r.update(dt, snapAt({ twoBlock: true, levers: { tele: 1 } }));
+  assert.equal(r.counters.twoBlockCount, 0, 'tele-out into the limit is not counted'); assert.ok(r.stops.has('HOOK_LIMIT'));
+  expectPerm(r, { teleOut: 0, hoistUp: 0, lower: 1 }, 'at the limit');
+  r.update(dt, snapAt({ twoBlock: false })); r.update(dt, snapAt({ twoBlock: true, levers: { hoist: 1 } }));
+  assert.equal(r.counters.twoBlockCount, 1, 'hoisting into the limit is');
+  // drives: tele-out slows over the last 0.6 m of boom travel and stops at the switch; no 'upperLimit' event
+  const all = { hoistUp: 1, lower: 1, luffUp: 1, luffDown: 1, teleOut: 1, teleIn: 1, slewL: 1, slewR: 1 };
+  const u = new MobileDrives({ k: 0 }); u.reset({ theta: 0.9, ropeLen: 4.0, falls: 1, blockHeight: 1 });
+  const ev = []; let vNear = null;
+  for (let i = 0; i < 30 * 120; i++) {
+    u.update(dt, { tele: 1 }, all, { tension: 2452 }); ev.push(...u.events);
+    if (vNear === null && u.fallLength() - u.ropeLenMin < 0.1) vNear = u.boom.speed;
+  }
+  assert.ok(vNear !== null && vNear < 0.5 * DRIVES.tele.speed, `slowed near the limit (${vNear})`);
+  assert.ok(u.twoBlock && u.fallLength() >= u.ropeLenMin - 0.005, `stops at the limit (ℓ ${u.fallLength().toFixed(3)})`);
+  assert.ok(!ev.includes('upperLimit'), 'no upper-limit trip event from telescoping');
 });
 
 test('luff drive: load factors, ramps, end damping (§3.3)', () => {

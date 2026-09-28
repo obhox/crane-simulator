@@ -344,6 +344,10 @@ export const BALLAST = { raiseTime: 45, quickPenalty: 120 };
 export const MOBILE_SETTINGS = { machine: 'tower', mobileStart: 'pad', siteSpeedLimit: 10, quickBallast: false, allowBypass: false, timeWarp: true };
 export const TIME_WARP = 4; // hold Z: ×4 time (§3.4 rules)
 
+// §3.2 / §8.5 slewing faster than recommended for the boom with a real load on: live RCL warning
+// 'slewSpeed' (the same test as the jobs' KPI), a toast after toastAfter s, at most every toastEvery s
+export const SLEW_OVERSPEED = { loadRatio: 0.25, marginRpm: 0.02, toastAfter: 0.3, toastEvery: 12 };
+
 // §8.6 / §8.10 MobileStart presets (see src/machines/machine.js for the shape;
 // use makeMobileStart() there to get a mutable copy)
 export const MOBILE_STARTS = {
@@ -409,4 +413,4 @@ deepFreeze(DRIVES); deepFreeze(DEFLECTION); deepFreeze(BOOM_CONTACT); deepFreeze
 deepFreeze(RCL_T); deepFreeze(RCL_COLOURS); deepFreeze(TOWER_ZONE); deepFreeze(MODES); deepFreeze(MODE_PROFILE); deepFreeze(CAMERA_MODES);
 deepFreeze(TRAVEL_INTERLOCK); deepFreeze(TYRES_LIFT); deepFreeze(VEHICLE); deepFreeze(SPEED_LIMITS); deepFreeze(CRANE_APPROACH);
 deepFreeze(SPAWN); deepFreeze(ROUTE); deepFreeze(P1); deepFreeze(BALLAST); deepFreeze(MOBILE_SETTINGS); deepFreeze(MOBILE_STARTS);
-deepFreeze(AUDIO_MIX); deepFreeze(CAMERAS);
+deepFreeze(AUDIO_MIX); deepFreeze(CAMERAS); deepFreeze(SLEW_OVERSPEED);

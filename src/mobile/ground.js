@@ -66,10 +66,16 @@ export const pressureKPa = (reactionN, area) => (area > 0 ? Math.max(0, reaction
 
 // Per-float permanent settlement [E] (§4.8):
 //   p ≤ allow:        no settlement
-//   allow < p < ult:  ṡ = 0.004·(p/allow − 1) m/s
+//   allow < p < ult:  consolidation toward s∞ = SETTLE_C·(p/allow − 1) with time
+//                     constant SETTLE_TAU: ṡ = (s∞ − s)/τ (never negative). The
+//                     initial rate is the spec's 0.004·(p/allow − 1) m/s, but the
+//                     float settles and stabilises instead of sinking forever
+//                     (bare pad on P1, 713 kPa / 400: ≈ 39 mm, 95 % in ≈ 40 s)
 //   p ≥ ult:          punch-through, ṡ = 0.25 m/s until s ≥ 0.40 m or p < allow
 // Settlement lowers the float's support height (outriggers.supports), so the
 // carrier tilts: RCL tilt warning, capacity loss and possibly a tip.
+export const SETTLE_C = 0.05; // m of final settlement per unit of overstress (p/allow − 1) [E]
+export const SETTLE_TAU = SETTLE_C / GROUND.settleRate; // 12.5 s: keeps the initial rate 0.004·(p/allow − 1)
 export class Settlement {
   constructor() {
     this.s = [0, 0, 0, 0]; // m, FLOATS order FL, FR, RL, RR
@@ -120,7 +126,9 @@ export class Settlement {
         ev.push({ type: 'punch', i, p });
         rate = GROUND.punchRate;
       } else if (p > gnd.allowKPa) {
-        rate = GROUND.settleRate * (p / gnd.allowKPa - 1);
+        // consolidation toward s∞ (no overshoot past it; settlement is permanent)
+        const sInf = Math.min(GROUND.punchMax, SETTLE_C * (p / gnd.allowKPa - 1));
+        if (sInf > this.s[i]) rate = Math.min((sInf - this.s[i]) / SETTLE_TAU, (sInf - this.s[i]) / Math.max(dt, 1e-9));
       }
       if (rate > 0) this.s[i] = Math.min(GROUND.punchMax, this.s[i] + rate * dt);
       if (this.s[i] > this.maxS) this.maxS = this.s[i];

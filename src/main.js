@@ -17,8 +17,7 @@ import { Signaller } from './signaller.js';
 import { JobRunner, JOBS } from './jobs.js';
 import { Hud } from './hud.js';
 import { TowerMachine } from './machines/towerMachine.js';
-import { MobileMachine } from './mobile/mobileMachine.js';
-import { NULL_INPUT, neutralInput, makeMobileStart } from './machines/machine.js';
+import { NULL_INPUT, neutralInput, makeMobileStart, findAttachable } from './machines/machine.js';
 import { MOBILE_SETTINGS, TIME_WARP } from './mobile/config.js';
 
 // Host for the machines (src/machines/machine.js contract): owns the world,
@@ -55,6 +54,9 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFShadowMap; // PCFSoft was removed in r18x
 app.appendChild(renderer.domElement);
+
+// the AT-100 (model + physics modules) is its own chunk, fetched while the assets load
+const mobileModule = import('./mobile/mobileMachine.js');
 
 // load CC0 assets before building the world (loading screen shows progress)
 const loadingText = document.querySelector('#loading .loading-status, #loading [data-status]') || null;
@@ -106,6 +108,7 @@ function syncColliders(m) {
 const tower = new TowerMachine(ctx);
 syncColliders(tower);
 ctx.craneMats = tower.parts.mats;
+const { MobileMachine } = await mobileModule;
 const mobile = new MobileMachine(ctx);
 syncColliders(mobile);
 const machines = { tower, mobile };
@@ -123,8 +126,12 @@ const hud = new Hud(document.getElementById('hud'), {
   onQuit: () => toMenu(),
   onRetry: () => currentJobId && startJob(currentJobId),
   onNextJob: () => {
-    const i = JOBS.findIndex((j) => j.id === currentJobId);
-    startJob(JOBS[(i + 1) % JOBS.length].id);
+    // the next job for the same machine (the job list is presented per machine)
+    const def = JOBS.find((j) => j.id === currentJobId);
+    const mid = def?.machine === 'mobile' ? 'mobile' : 'tower';
+    const same = JOBS.filter((j) => (j.machine === 'mobile' ? 'mobile' : 'tower') === mid);
+    const i = same.findIndex((j) => j.id === currentJobId);
+    if (same.length) startJob(same[(i + 1) % same.length].id);
   },
   onSetting: (k, v) => applySetting(k, v, true),
   onPowerClick: () => input.push('power'),
@@ -158,9 +165,16 @@ function spawnLoad(type, x, z, yaw = 0, baseY = 0) {
   return l;
 }
 
+// a load's merged geometries are its own (loadModels.js Kit.build); materials / textures are
+// shared by every spawn and stay (anything marked userData.shared is left alone as well)
+function disposeLoadMesh(l) {
+  l.mesh.traverse((o) => { if (o.geometry && !o.geometry.userData?.shared) o.geometry.dispose(); });
+}
+
 function removeLoad(l) {
   for (const m of machineList) if (m.hoist.load === l) m.hoist.detach();
   scene.remove(l.mesh);
+  disposeLoadMesh(l);
   world.remove(l.box);
   const i = loads.indexOf(l);
   if (i >= 0) loads.splice(i, 1);
@@ -174,6 +188,7 @@ function clearLoads() {
   for (const m of machineList) if (m.hoist.load) m.hoist.detach();
   for (const l of loads) {
     scene.remove(l.mesh);
+    disposeLoadMesh(l);
     world.remove(l.box);
   }
   loads.length = 0;
@@ -373,24 +388,8 @@ function setPaused(p) {
 }
 
 // ------------------------------------------------------------------ hook helpers (generic)
-const _a = new THREE.Vector3();
-
-function findAttachable(hoist) {
-  if (hoist.load) return null;
-  const h = hoist.hook;
-  let best = null, bd = Infinity;
-  for (const l of loads) {
-    if (l.attached) continue;
-    l.topCenter(_a);
-    const horiz = Math.hypot(h.x - _a.x, h.z - _a.z);
-    const dy = h.y - _a.y;
-    if (horiz < 1.3 && dy > -0.3 && dy < l.def.sling + 1.2 && horiz + Math.abs(dy) * 0.1 < bd) {
-      best = l;
-      bd = horiz;
-    }
-  }
-  return best;
-}
+// findAttachable (machine.js): only a hook within the slings' reach can be hooked on; one held
+// higher over a load gets "lower the hook" instead of snatching the load up (rope.js sling constraint)
 
 function canRelease(hoist) {
   const l = hoist.load;
@@ -410,10 +409,12 @@ function hookAction(m) {
     } else if (!hoist.loadGrounded) hud.toast('Cannot release a suspended load — land it first', 'bad');
     else hud.toast('Slack the slings first (lower the hook a little)', 'warn');
   } else {
-    const l = findAttachable(hoist);
-    if (l) {
-      hoist.attach(l);
-      hud.toast(`Rigger: hooked on — ${l.def.name}`, 'good');
+    const f = hoist.stowed ? null : findAttachable(hoist, loads);
+    if (f && f.reach) {
+      hoist.attach(f.load);
+      hud.toast(`Rigger: hooked on — ${f.load.def.name}`, 'good');
+    } else if (f) {
+      hud.toast(`Lower the hook ${Math.max(0.1, f.over).toFixed(1)} m — the slings don't reach`, 'warn');
     } else hud.toast('No load within reach — lower the hook onto the load', 'warn');
   }
 }
@@ -489,6 +490,18 @@ function stepPhysics(dt) {
   wind.update(dt);
 }
 
+// highest collider top under the active machine's load (jobs): the machine's own boom boxes
+// (mobile, there for the other machine's hook and load) are not "below" its own load
+function supportBelow(l) {
+  const own = active.boomColliders;
+  if (!own) return world.heightAt(l.pos.x, l.pos.z);
+  for (let i = 0; i < own.length; i++) { ownOn[i] = own[i].enabled; own[i].enabled = false; }
+  const y = world.heightAt(l.pos.x, l.pos.z);
+  for (let i = 0; i < own.length; i++) own[i].enabled = ownOn[i];
+  return y;
+}
+const ownOn = [];
+
 // gameplay tick without rendering (QA / autopilot): n fixed steps + job logic
 function advance(seconds) {
   const FIX = 1 / PHYS.rate;
@@ -497,7 +510,7 @@ function advance(seconds) {
     stepPhysics(FIX);
     if (state === 'play') {
       const h = active.hoist;
-      if (h.load) jobs.supportBelow = world.heightAt(h.load.pos.x, h.load.pos.z);
+      if (h.load) jobs.supportBelow = supportBelow(h.load);
       jobs.update(FIX, active.levers, input.horn);
       if (jobs.job && jobs.done) state = 'results';
     }
@@ -510,7 +523,9 @@ function hudState() {
   const h = active.hoist;
   if (!s.machine) s.machine = active.id;
   s.cameraName = CAMERA_NAMES[cameras.mode] || cameras.mode;
-  s.attachable = !!findAttachable(h);
+  const f = findAttachable(h, loads);
+  s.attachable = !!(f && f.reach);
+  s.attachLower = f && !f.reach ? f.over : 0; // over a load, slings not reaching yet: metres to lower
   s.canRelease = canRelease(h);
   s.job = !!jobs.job;
   s.jobTime = jobs.t || 0;
@@ -551,7 +566,7 @@ function frame(now) {
   }
   if (state === 'play') {
     const h = active.hoist;
-    if (h.load) jobs.supportBelow = world.heightAt(h.load.pos.x, h.load.pos.z);
+    if (h.load) jobs.supportBelow = supportBelow(h.load);
     jobs.update(dt * warp, active.levers, input.horn); // job time is sim time
     if (jobs.job && jobs.done) state = 'results';
   }

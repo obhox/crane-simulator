@@ -40,7 +40,7 @@ const KEY_ACTIONS = {
   // §6.3. Space = engine stop / start (toggle).
   'mobile-drive': {
     KeyX: 'gear', KeyK: 'program', KeyF: 'parkingBrake', KeyC: 'camera', Space: 'engine',
-    Enter: 'toSetup', NumpadEnter: 'toSetup', Escape: 'pause', Tab: 'switchMachine',
+    Enter: 'toSetup', NumpadEnter: 'toSetup', Escape: 'pause', Tab: 'switchMachine', KeyV: 'voice',
   },
   // §6.4. Space is the remote's stop button ('estop'): the machine halts every
   // outrigger motion (a hand-held remote always has one).
@@ -48,7 +48,7 @@ const KEY_ACTIONS = {
     Digit1: 'selectFL', Digit2: 'selectFR', Digit3: 'selectRL', Digit4: 'selectRR', Digit5: 'selectAll',
     Numpad1: 'selectFL', Numpad2: 'selectFR', Numpad3: 'selectRL', Numpad4: 'selectRR', Numpad5: 'selectAll',
     KeyX: 'mat', KeyT: 'pin', Enter: 'toCrane', NumpadEnter: 'toCrane', Backspace: 'toRoad',
-    KeyC: 'camera', Space: 'estop', Escape: 'pause', Tab: 'switchMachine',
+    KeyC: 'camera', Space: 'estop', Escape: 'pause', Tab: 'switchMachine', KeyV: 'voice',
   },
 };
 
@@ -65,16 +65,22 @@ const PAD_ACTIONS = {
 export const ACTIONS = {
   tower: ['hook', 'camera', 'power', 'estop', 'voice', 'freeslew', 'slewmode', 'pause', 'testlift', 'sway', 'lookback', 'windoff', 'nextcam', 'switchMachine'],
   'mobile-crane': ['hook', 'camera', 'power', 'estop', 'voice', 'rclConfig', 'reeving', 'pin', 'freeslew', 'rclMute', 'toSetup', 'pause', 'switchMachine', 'bypass'],
-  'mobile-drive': ['gear', 'program', 'parkingBrake', 'camera', 'engine', 'toSetup', 'pause', 'switchMachine'],
-  'mobile-setup': ['selectFL', 'selectFR', 'selectRL', 'selectRR', 'selectAll', 'selectPrev', 'selectNext', 'mat', 'pin', 'toCrane', 'toRoad', 'camera', 'estop', 'pause', 'switchMachine'],
+  'mobile-drive': ['gear', 'program', 'parkingBrake', 'camera', 'engine', 'toSetup', 'pause', 'switchMachine', 'voice'],
+  'mobile-setup': ['selectFL', 'selectFR', 'selectRL', 'selectRR', 'selectAll', 'selectPrev', 'selectNext', 'mat', 'pin', 'toCrane', 'toRoad', 'camera', 'estop', 'pause', 'switchMachine', 'voice'],
 };
 
 // the host's HUD dialogs (RCL config / reeving) flag themselves here; while one
 // is open every control is neutral and gamepad presses are left to the dialog
 const modalOpen = () => typeof document !== 'undefined' && !!document.body && !!document.body.dataset.hudModal;
 
+// the live Input (the HUD reads timeWarp from it for the ×4 badge)
+let current = null;
+/** The most recently constructed Input, or null. */
+export function currentInput() { return current; }
+
 export class Input {
   constructor() {
+    current = this;
     this.keys = new Set();
     this._profile = 'tower';
     this.levers = { slew: 0, trolley: 0, hoist: 0, tele: 0, luff: 0 };

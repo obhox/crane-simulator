@@ -363,6 +363,25 @@ export function columnFor(L) {
   return { lo, hi, exact: lo === hi };
 }
 
+// Chart label for a boom length: the pinned geometric lengths (15.226, 30.13,
+// 45.034 m …) map to their labels (15.2, 30.1, 45.0), anything else stays L.
+// The length-keyed tables (T_tel, v_perm, recommended slew) are keyed by the
+// labels, so a pinned 45.034 m boom must read the "≤ 45.0 m" row, not the next.
+export function nominalLength(L) {
+  for (let k = 0; k < LENGTHS.length; k++) if (Math.abs(L - PIN_GEOM[k]) <= L_TOL || Math.abs(L - LENGTHS[k]) <= L_TOL) return LENGTHS[k];
+  return L;
+}
+
+// Telescoping segment of a boom length: index of the pin at its UPPER end,
+// i.e. the first pinned length ≥ L (a boom standing exactly on pin k — e.g.
+// during the 4 s pin event — belongs to the stroke below it). The telescopable
+// load is a property of the stroke (§2.3.8: "L ≤ 33.9 m: 8 t" = strokes up to
+// 33.9 m), so it is constant over a stroke instead of stepping 2 cm after a pin.
+export function teleSegment(L) {
+  for (let k = 0; k < PIN_GEOM.length; k++) if (PIN_GEOM[k] >= L - 1e-6) return k;
+  return PIN_GEOM.length - 1;
+}
+
 // 1. chart key: B{base}_CW{cwKg} on outriggers, TYRES_CW{cwKg} on tyres (only CW0 exists)
 export function chartKey(cfg) {
   if (!cfg) return null;
@@ -455,26 +474,42 @@ export function rmaxFor(cfg, L, pinnedK = null) {
   return Math.min(a ? a.rmax : 0, b ? b.rmax : 0);
 }
 // 8. telescopable load (gross, both directions) [E]; 9. permissible wind (3-s gust at the head) [E]
-export const telescopableLoad = (L) => tableLookup(TELE_LOAD, L);
-export const windPerm = (L) => tableLookup(WIND_PERM, L);
+// (looked up by the chart label: a pinned 45.034 m boom is the "≤ 45.0 m" row)
+export const telescopableLoad = (L) => tableLookup(TELE_LOAD, nominalLength(L));
+export const windPerm = (L) => tableLookup(WIND_PERM, nominalLength(L));
+// T_tel of the stroke that contains L (between pins; see teleSegment)
+export const segmentTeleLoad = (L) => tableLookup(TELE_LOAD, LENGTHS[teleSegment(L)]);
+// Telescopable load per direction {out, in} (kg gross) at boom length L.
+//   pinned at column k: out = the stroke k → k+1 (T_tel(L_{k+1})), in = the stroke k−1 → k (T_tel(L_k)).
+//   between pins: both = the stroke the boom is in. A real RCL checks the load for the stroke
+//   it is about to start BEFORE the pins are pulled, so a boom never unpins with an over-limit load.
+export function teleLoads(L, pinnedK = null) {
+  if (pinnedK === null || pinnedK === undefined) { const t = segmentTeleLoad(L); return { out: t, in: t }; }
+  const k = Math.max(0, Math.min(LENGTHS.length - 1, pinnedK));
+  return {
+    out: tableLookup(TELE_LOAD, LENGTHS[Math.min(k + 1, LENGTHS.length - 1)]),
+    in: tableLookup(TELE_LOAD, LENGTHS[k]),
+  };
+}
 // large-area loads [S16]: v_max = min(v_perm, v_perm·sqrt(1.2·m_t / A_face))
 export function windPermLoad(L, massKg, faceArea) {
   const v = windPerm(L);
   if (!(massKg > 0) || !(faceArea > 0)) return v;
   return Math.min(v, v * Math.sqrt((1.2 * massKg / 1000) / faceArea));
 }
-// recommended slew speed under load [S15] (rpm)
-export const slewRecRpm = (L) => tableLookup(SLEW_REC_RPM, L);
+// recommended slew speed under load [S15] (rpm), by chart label (a pinned 30.13 m boom → 0.5 rpm)
+export const slewRecRpm = (L) => tableLookup(SLEW_REC_RPM, nominalLength(L));
 
 // Raw chart value (kg) at boom L / radius R. pinnedK = the pinned chart column
 // (0..11) or null when the boom is between pins: then the conservative
-// min(col(k_lo), col(k_hi), T_tel(L)) applies (§2.3.3, RCL "TELE / NOT PINNED").
+// min(col(k_lo), col(k_hi), T_tel) applies (§2.3.3, RCL "TELE / NOT PINNED"),
+// with T_tel of the stroke the boom is in (constant over the stroke).
 export function chartCapacity(cfg, L, R, pinnedK = null) {
   const cs = cols(cfg);
   if (!cs) return 0;
   if (pinnedK !== null && pinnedK !== undefined) return colInterp(colAt(cs, cfg, pinnedK), R);
   const { lo, hi } = columnFor(L);
-  return Math.min(colInterp(colAt(cs, cfg, lo), R), colInterp(colAt(cs, cfg, hi), R), telescopableLoad(L));
+  return Math.min(colInterp(colAt(cs, cfg, lo), R), colInterp(colAt(cs, cfg, hi), R), segmentTeleLoad(L));
 }
 
 // RCL capacity (kg gross): chart value capped by the reeved block rating (§2.3.5).
@@ -493,7 +528,8 @@ export function lookup(cfg, L, R, pinnedK = null) {
   const cs = cols(cfg), perm = permitted(cfg);
   const a = colAt(cs, cfg, lo), b = colAt(cs, cfg, hi);
   const ca = colInterp(a, R), cb = colInterp(b, R);
-  const teleKg = telescopableLoad(L);
+  // unpinned: T_tel of the current stroke caps the capacity; pinned: informational (label row)
+  const teleKg = pinned ? telescopableLoad(L) : segmentTeleLoad(L);
   let chartKg = Math.min(ca, cb), governedBy = 'chart';
   if (!pinned && teleKg < chartKg) { chartKg = teleKg; governedBy = 'tele'; }
   const blockKg = HOOK_BLOCKS[cfg?.block]?.ratedKg ?? 0;

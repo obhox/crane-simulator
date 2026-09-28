@@ -37,7 +37,21 @@ const SLAM_MIN_DEG = 0.1; // a recovery below this peak angle is a teeter, not a
 const ROCK_JUMP_M = 0.005; // rest-plane jump (m at any support, one step) that makes it a dynamic rock
 const TIP_LABEL_DEG = 2; // a rock episode past this angle is reported as TIPPING and ends with a 'slam'
 const SET_TIME = 0.5; // s a float must carry ≥ 20 kN before it counts as "set" [E]
-const STATE_TIME = 0.2; // s a FLOAT_LIGHT / LIFTOFF condition must persist (debounce) [E]
+const STATE_TIME = 0.2; // s a LIFTOFF condition must persist (debounce) [E]
+// FLOAT_LIGHT [E] (§4.4, refined): the warning is a tipping precursor, so it looks
+// at the support EDGES of the float rectangle, not at single floats: an edge is
+// light when its two floats together carry < EDGE_LIGHT_FRAC of their unloaded
+// share (the CoP is approaching the opposite hull edge); its set floats are then
+// flagged light. A lift over a CORNER unloads the diagonal float alone to ~0 at
+// about half the tipping moment (rigid carrier, plane sharing) while both its
+// edges stay well loaded — normal for an in-chart lift (M3 at 75 %), not a
+// warning. Over the side / rear an edge goes light at ≈ 110–130 % of the chart,
+// before the far floats lift. The condition must persist LIGHT_TIME, so a
+// lift-off snatch or a swinging load does not count.
+const EDGE_LIGHT_FRAC = 0.25;
+const EDGE_CLEAR_FRAC = 0.30; // hysteresis: a light edge clears only above this
+const LIGHT_TIME = 0.6; // s
+const EDGES = [[0, 1], [2, 3], [0, 2], [1, 3]]; // FLOATS FL, FR, RL, RR: front, rear, left, right edge
 const QS_ROCK_GAP = 0.3; // s between quasi-static 'rock' (clunk) events
 const FALL_STOP_DEG = 88; // cinematic fall after OVERTURNED stops here or when the head hits the ground
 
@@ -329,6 +343,9 @@ export class Stability {
     this.floatSet = [false, false, false, false]; // latched "set" (§4.4)
     this.floatLight = [false, false, false, false];
     this.floatLifted = [false, false, false, false];
+    this.floatShare = [0, 0, 0, 0]; // N, unloaded (no rope force) plane-sharing reaction of each set float
+    this._litEdge = -1;
+    this.edgeReserve = NaN; // smallest (R_a + R_b)/(share_a + share_b) over the float-rectangle edges
     this._wasLift = [false, false, false, false];
     this._floatE = [0, 0, 0, 0];
     this._setT = [0, 0, 0, 0]; this._liftT = [0, 0, 0, 0]; this._lightT = [0, 0, 0, 0];
@@ -552,16 +569,19 @@ export class Stability {
     this.marginUnloaded = marginOf(supports, _idx, this._hullSet(supports, n, res), this.copUnloaded.X, this.copUnloaded.Y);
     this.util = this.marginUnloaded > 1e-6 ? Math.max(0, 1 - this.margin / this.marginUnloaded) : 1;
 
-    // states (§4.4), each condition must persist STATE_TIME (s) before it counts
+    // states (§4.4), each condition must persist STATE_TIME / LIGHT_TIME (s) before it counts
     let lifted = false, light = false, anyLoaded = false;
     for (let fi = 0; fi < 4; fi++) if (this.floatR[fi] >= STABILITY.floatLightN) anyLoaded = true;
+    this._floatShares(supports, n);
+    const le = this._lightEdge(), ea = le >= 0 ? EDGES[le][0] : -1, eb = le >= 0 ? EDGES[le][1] : -1;
     for (let fi = 0; fi < 4; fi++) {
       const set = this.floatSet[fi];
-      const isLift = set && this.floatLifted[fi], isLight = set && !this.floatLifted[fi] && anyLoaded && this.floatR[fi] < STABILITY.floatLightN;
+      const isLift = set && this.floatLifted[fi];
+      const isLight = set && !this.floatLifted[fi] && anyLoaded && (fi === ea || fi === eb);
       this._liftT[fi] = isLift ? this._liftT[fi] + dt : 0;
       this._lightT[fi] = isLight ? this._lightT[fi] + dt : 0;
       const lift = this._liftT[fi] >= STATE_TIME || (isLift && this._wasLift[fi]);
-      const lt = this._lightT[fi] >= STATE_TIME || (isLight && this.floatLight[fi]);
+      const lt = this._lightT[fi] >= LIGHT_TIME || (isLight && this.floatLight[fi]);
       if (lift && !this._wasLift[fi]) this.events.push({ type: 'liftoff', id: FLOATS[fi].id });
       if (lt && !this.floatLight[fi]) this.events.push({ type: 'floatLight', id: FLOATS[fi].id });
       this._wasLift[fi] = lift; this.floatLight[fi] = lt;
@@ -569,6 +589,51 @@ export class Stability {
     }
     this.state = lifted ? 'LIFTOFF' : light ? 'FLOAT_LIGHT' : 'STABLE';
     this._tiltOut();
+  }
+
+  // Unloaded share of each set float (N): equal-strain plane sharing of the crane
+  // without the rope force (copUnloaded) over the set floats; W/4 when < 3 are set.
+  // Reference for the FLOAT_LIGHT edge test. Uses the solver scratch after the solve.
+  _floatShares(supports, n) {
+    const sh = this.floatShare, cu = this.copUnloaded, W = cu.W;
+    for (let fi = 0; fi < 4; fi++) sh[fi] = W / 4;
+    const M = _S;
+    M.fill(0);
+    let cnt = 0;
+    for (let i = 0; i < n; i++) {
+      const s = supports[i], fi = FLOAT_INDEX[s.id];
+      if (fi === undefined || !this.floatSet[fi]) continue;
+      const k = s.k ?? 1;
+      M[0] += k; M[1] += k * s.x; M[2] += k * s.y; M[5] += k * s.x * s.x; M[6] += k * s.x * s.y; M[10] += k * s.y * s.y;
+      cnt++;
+    }
+    if (cnt < 3) return;
+    M[4] = M[1]; M[8] = M[2]; M[9] = M[6];
+    M[3] = W; M[7] = W * cu.X; M[11] = W * cu.Y;
+    if (!solve3(_c3)) return;
+    for (let i = 0; i < n; i++) {
+      const s = supports[i], fi = FLOAT_INDEX[s.id];
+      if (fi === undefined || !this.floatSet[fi]) continue;
+      sh[fi] = Math.max(0, (s.k ?? 1) * (_c3[0] + _c3[1] * s.x + _c3[2] * s.y));
+    }
+  }
+
+  // Weakest support edge (index into EDGES) whose two set floats carry < EDGE_LIGHT_FRAC
+  // of their unloaded share, or −1. this.edgeReserve = the smallest edge fraction (info).
+  _lightEdge() {
+    let best = -1, bf = Infinity;
+    for (let e = 0; e < 4; e++) {
+      const a = EDGES[e][0], b = EDGES[e][1];
+      if (!this.floatSet[a] || !this.floatSet[b]) continue;
+      const sh = this.floatShare[a] + this.floatShare[b];
+      if (!(sh > 0)) continue;
+      const f = (this.floatR[a] + this.floatR[b]) / sh;
+      if (f < bf) { bf = f; best = e; }
+    }
+    this.edgeReserve = best >= 0 ? bf : NaN;
+    const lit = best >= 0 && bf < (best === this._litEdge ? EDGE_CLEAR_FRAC : EDGE_LIGHT_FRAC);
+    this._litEdge = lit ? best : -1;
+    return this._litEdge;
   }
 
   // supports within hullTol of the plane → _idx; returns the count
@@ -747,6 +812,9 @@ export class Stability {
     const farRise = this._tipY(E.far) - E.far.y;
     if (this.phi >= STABILITY.overturnDeg * DEG || hy <= STABILITY.headMin || farRise > STABILITY.farFloatMax) {
       this.state = 'OVERTURNED'; this.ok = false;
+      // no support polygon any more: the margin readout is undefined (HUD '—'), not the last
+      // (possibly positive, e.g. after the load landed mid-fall) CoP distance to the edge
+      this.margin = NaN; this.marginUnloaded = NaN; this.util = 1;
       this.events.push({ type: 'overturned', phiDeg: this.phi / DEG, reason: this.phi >= STABILITY.overturnDeg * DEG ? 'angle' : hy <= STABILITY.headMin ? 'head' : 'float' });
       this._head = head ? { x: head.x, y: head.y, z: head.z } : null;
     }
@@ -783,6 +851,7 @@ export class Stability {
   // after OVERTURNED: the machine keeps falling under gravity (no rope) until
   // the head reaches the ground or it lies on its side, then freezes.
   _fall(dt, bodies) {
+    this.margin = NaN; this.marginUnloaded = NaN; this.util = 1;
     if (this.resting || !this.edge) return;
     const E = this.edge;
     axisRot(E.e.x, E.e.y, E.e.z, this.phi, this._T);

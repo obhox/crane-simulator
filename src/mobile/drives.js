@@ -19,6 +19,18 @@ const SL = DRIVES.slew, LU = DRIVES.luff, HO = DRIVES.hoist, DR = DRIVES.drum;
 const ROPE_TOTAL = AT100.hoist.ropeLen; // 250 m
 const THETA_MIN = AT100.luff.minDeg * DEG, THETA_MAX = AT100.luff.maxDeg * DEG;
 const NEUTRAL = 0.02;
+// Lateral boom mode damping: DEFLECTION.zetaL is the bare structure (2 %); the
+// hydraulic slewing gear (motor leakage, brake valves) that the lateral mode
+// drives through the turntable adds ≈ 5 % [E] — without it a 52 m boom rang for
+// > 40 s after every slew stop.
+const ZETA_L = DEFLECTION.zetaL + 0.05;
+// Slew speed-up ramp on the commanded speed [E, LICCON-like]: |dω/dt| ≤ ω_max/(3 + L/10)
+// (≈ 4 s to 2 rpm at 11.5 m, ≈ 8 s at 52 m). Only speeding up is ramped: slowing
+// down / stopping keeps the torque-limited behaviour the zone limiter is sized for.
+const slewRampRate = (L) => SL.maxSpeed / (3 + L / 10);
+// Tele-out soft stop before the hook limit [E]: the last TELE_SLOW m of boom travel
+// before the anti-two-block switch run down to TELE_SLOW_MIN speed.
+const TELE_SLOW = 0.6, TELE_SLOW_MIN = 0.25;
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const approach = (v, t, r) => (v < t ? Math.min(v + r, t) : Math.max(v - r, t));
 // cumulative drum layer capacities (m): 49.1 / 102.2 / 159.2 / 220.2 / 285.1
@@ -94,6 +106,7 @@ export class MobileDrives {
     this.boom = opts.boom || new TeleBoom(opts.k ?? 0);
     // slew (ψ + = toward the left; lever + right drives ψ negative)
     this.psi = 0; this.psiDot = 0; this.psiDDot = 0;
+    this.slewTarget = 0; // ramped commanded slew speed (rad/s)
     this.freeSlew = false;
     this.pinned = false; // turntable lock pin
     this.brakeSlew = true;
@@ -152,7 +165,7 @@ export class MobileDrives {
    */
   reset(s = {}) {
     if (s.boomK !== undefined) this.boom.setPinned(s.boomK);
-    this.psi = s.psi ?? 0; this.psiDot = 0; this.psiDDot = 0;
+    this.psi = s.psi ?? 0; this.psiDot = 0; this.psiDDot = 0; this.slewTarget = 0;
     this.theta = clamp(s.theta ?? 0, THETA_MIN, THETA_MAX); this.thetaDot = 0; this.vCyl = 0;
     this.falls = s.falls ?? this.falls;
     this.blockHeight = s.blockHeight ?? this.blockHeight;
@@ -222,8 +235,12 @@ export class MobileDrives {
     // ------------------------------------------------------ telescope (§3.4)
     const L0 = this.L;
     let tele = powered ? (lev.tele || 0) * micro : 0;
-    // mechanical anti-two-block switch: no tele-out at the hook limit (also in bypass)
-    if (tele > 0 && this.fallLength(L0, n) <= this.ropeLenMin + 0.02) tele = 0;
+    // mechanical anti-two-block switch: no tele-out at the hook limit (also in bypass); tele-out
+    // raises the hook by ΔL/n, so the last TELE_SLOW m of boom travel before it are slowed
+    if (tele > 0) {
+      const toLimitL = (this.fallLength(L0, n) - this.ropeLenMin - 0.02) * n; // boom travel left
+      tele = toLimitL <= 0 ? 0 : Math.min(tele, clamp(toLimitL / TELE_SLOW, TELE_SLOW_MIN, 1)); // caps the speed; a slow lever passes
+    }
     this.boom.update(dt, tele, pm);
     for (const e of this.boom.events) this.events.push(e);
     this.applied.tele = this.boom.cmd;
@@ -267,10 +284,19 @@ export class MobileDrives {
       }
     } else {
       this.brakeSlew = false;
+      // commanded speed with the speed-up ramp (from the actual speed when it is already turning
+      // that way); slowing down and reversing through zero are not ramped
+      let rt = this.slewTarget;
+      if (rt * target <= 0) rt = 0;
+      if (this.psiDot * target > 0 && Math.abs(this.psiDot) > Math.abs(rt)) rt = this.psiDot;
+      if (Math.abs(target) <= Math.abs(rt)) rt = target;
+      else rt += Math.sign(target) * Math.min(Math.abs(target) - Math.abs(rt), slewRampRate(L) * dt);
+      this.slewTarget = rt;
       // speed-controlled hydraulic drive with torque limit (compensates external torques)
-      const need = (I * (target - this.psiDot)) / SL.response - ext;
+      const need = (I * (rt - this.psiDot)) / SL.response - ext;
       drive = clamp(need, -SL.torqueMax, SL.torqueMax);
     }
+    if (Math.abs(lever) < NEUTRAL || this.pinned || this.freeSlew || !powered) this.slewTarget = this.psiDot;
     this.slewTorque = drive;
     if (!this.pinned) {
       this.psiDot += ((drive + ext) / I) * dt;
@@ -345,7 +371,8 @@ export class MobileDrives {
       this.hookVel = 0; this.lineVel = 0;
     }
     this.twoBlock = this.fallLength(L, n) <= this.ropeLenMin + 0.02;
-    if (this.twoBlock && !wasTop && ((lev.hoist || 0) > 0.05 || (lev.tele || 0) > 0.05)) this.events.push('upperLimit');
+    // 'upperLimit' = hoisted into the hook limit (a tele-out stop there is a normal limiter action)
+    if (this.twoBlock && !wasTop && (lev.hoist || 0) > 0.05) this.events.push('upperLimit');
     const wasLow = this.lowerLimit;
     this.lowerLimit = this.drumRope <= HO.minDrumRope + 0.02;
     if (this.lowerLimit && !wasLow && (lev.hoist || 0) < -0.05) this.events.push('lowerLimit');
@@ -362,7 +389,7 @@ export class MobileDrives {
     this.dv += this.dvDot * dt;
     const [vMin, vMax] = DEFLECTION.clampV;
     if (this.dv < vMin || this.dv > vMax) { this.dv = clamp(this.dv, vMin, vMax); this.dvDot = 0; }
-    this.dlDot += (wl * wl * (this.dlStatic - this.dl) - 2 * DEFLECTION.zetaL * wl * this.dlDot - DEFLECTION.slewCoupling * this.psiDDot * L) * dt;
+    this.dlDot += (wl * wl * (this.dlStatic - this.dl) - 2 * ZETA_L * wl * this.dlDot - DEFLECTION.slewCoupling * this.psiDDot * L) * dt;
     this.dl += this.dlDot * dt;
     if (Math.abs(this.dl) > DEFLECTION.clampL) { this.dl = clamp(this.dl, -DEFLECTION.clampL, DEFLECTION.clampL); this.dlDot = 0; }
   }
