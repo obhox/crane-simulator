@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Terrain Lab</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #0b0e12; overflow: hidden; }
+      #info { position: fixed; left: 8px; top: 6px; color: #cfd6de; font: 12px/1.3 monospace; text-shadow: 0 1px 2px #000; pointer-events: none; }
+    </style>
+  </head>
+  <body>
+    <div id="info">loading…</div>
+    <script>
+      // Dev harness only: ignore the dev server's reload broadcasts, which
+      // fire on every edit anywhere in the project (several people edit
+      // concurrently). This classic script runs before the deferred client
+      // module, so its HMR socket never connects. Reload the tab by hand.
+      (() => {
+        const WS = window.WebSocket;
+        window.WebSocket = function (url, proto) {
+          if (proto === 'vite-hmr' || String(url).includes('token=')) {
+            return { addEventListener() {}, removeEventListener() {}, send() {}, close() {}, readyState: 0 };
+          }
+          return new WS(url, proto);
+        };
+      })();
+    </script>
+    <!-- Dev-only harness for the ground surfaces (not part of the production
+         build). ?full=1 also builds site + city + streets + crane. -->
+    <script type="module" src="./lab.js"></script>
+  </body>
+</html>

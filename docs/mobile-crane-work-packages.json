@@ -1,0 +1,95 @@
+[
+ {
+  "key": "WP0-INT-contracts-and-integration",
+  "owner_files": [
+   "src/main.js",
+   "src/machines/machine.js",
+   "src/machines/towerMachine.js",
+   "src/machines/ropeRender.js",
+   "src/mobile/mobileMachine.js",
+   "src/mobile/config.js",
+   "package.json",
+   "scripts/run-tests.mjs",
+   "README.md"
+  ],
+  "description": "Phase 0, done first: write src/mobile/config.js with every section 1 number plus P1, SPAWN, ROUTE, TOWER_ZONE, RCL_T and HOOK_BLOCKS, then freeze it. Write the Machine JSDoc contract and MobileStart. Extract the tower into TowerMachine with zero behaviour change: move resetCrane, applySwayAssist, stepPhysics internals, updateVisuals, hudState, updateCabScreen and audio mix out of main.js. Move rope and sling rendering into RopeRenderer. Make main.js a host for {tower, mobile} with setMachine/Tab, NULL_INPUT, generic hook/camera/pause actions and colliders registration. Stub MobileMachine with a box carrier. Add npm test running scripts/run-tests.mjs. Phase 0 is done when all 7 tower jobs are unchanged. Phase 2: assemble MobileMachine from the Phase-1 modules in the section 9.4 step order. Implement mode logic ROAD/SETUP/CRANE/TIPPING/OVERTURNED, travel interlocks, MobileStart reset, park/activate, tower.park() (section 8.3), streets obstacle feed, the settings (machine, mobileStart, siteSpeedLimit, quickBallast, allowBypass, timeWarp) and __sim debug hooks. Then play M1-M6 end to end and tune [E] values.",
+  "interfaces": "Provides: Machine interface (section 9.1), MobileStart, config.js constants (read-only for everyone), sim.machine for jobs. Consumes: charts/boom/drives/rcl (PHYS), stability/outriggers/ground/ballast (STAB), Vehicle/route (DRIVE), buildMobileCrane/buildMobileHookBlock (MODEL), hud.setMachine/MobileHud and input profiles and cameras.attach (UI), audio.updateMobile, signaller geometry arg, jobs step kinds (JOBS), HoistSystem options (PHYS). Calls per 120 Hz step, per machine: m.step(dt, input); per frame: m.updateVisuals, hud.update(active.hudState()), cameras.update(dt, active), audio.update/updateMobile, streets.traffic.setObstacles(mobile.vehicleObstacles())."
+ },
+ {
+  "key": "WP-MODEL",
+  "owner_files": [
+   "src/mobile/model.js",
+   "src/mobile/modelParts.js",
+   "src/mobile/hookBlocks.js"
+  ],
+  "description": "Procedural three.js model of the AT-100 5.1 in the style of src/crane/model.js, using kit.js helpers and createCraneMaterials read-only. Carrier: 11.45 x 2.75 m, 5 axles at x_c +5.60/+2.90/+1.27/-0.28/-1.85, 385/95R25 tyres of dia 1.37 m, driver cab front-left, front outrigger box at x_c +4.58 and rear at -2.79, single-stage beams, jacks and floats, 4 mat slots and a rear deck at z 1.85. Superstructure: turntable, left-side crane cab (tiltable) with two joysticks and a screen canvas, winch drum, engine, CW frame and slabs A/B/C, luffing cylinder (2-stage visual; anchor A and attachment B from section 3.3). Boom: base plus 5 nested telescopic sections (0.90 x 1.06 m base, minus 0.07 m per side per section) with a head carrying 5 sheaves, anemometer and headCam mount. Hook blocks ball/hb26/hb60/hb90 with the section 1.4 heights. Beacons and work lights. Pivots follow the section 0 frames. Budget of 70 draw calls or fewer; bake a merged LOD for distance.",
+  "interfaces": "export function buildMobileCrane(mats) -> parts {root, carrier, wheels[5][2] (steer group + spin mesh), beams[4], jacks[4], floats[4], matSlots[4], upper (rotation.y = psi), craneCab{leftStick,rightStick,screen}, driverCab, boomPivot (rotation.z = theta), sections[6] (position.x = p_i along boom local +X), head{sheave, anemometer, headCamMount}, luffCyl{barrel,rod}, cwSlabs{A,B,C}, deckSlabs, bumperAnchor, lights{beacons,work}, cameraMounts{craneEye, driverEye}}. export function buildMobileHookBlock(id) -> THREE.Group (origin at hook bowl, block top at +blockHeight). No physics logic; all dimensions from src/mobile/config.js."
+ },
+ {
+  "key": "WP-PHYS",
+  "owner_files": [
+   "src/mobile/charts.js",
+   "src/mobile/boom.js",
+   "src/mobile/drives.js",
+   "src/mobile/rcl.js",
+   "src/physics/rope.js",
+   "scripts/test-mobile-charts.mjs",
+   "scripts/test-mobile-rcl.mjs"
+  ],
+  "description": "Crane mechanics and RCL. charts.js: the section 2.1 literals, the section 2.2 generator (build B100/B50 at 23.5 and 0 t at load), and lookup/interpolation, permitted(), Rmin/Rmax, telescopable load and permissible wind (section 2.3). boom.js: TeleBoom single-cylinder pinned state machine with the section 3.4 sequence, 0.13 m/s cylinder speed and 4 s pin events, plus luff-cylinder geometry and head position (section 3.1/3.3). drives.js: slew torque/inertia/brake/free-slew/turntable pin (section 3.2), luff rate from cylinder speed with load factors, telescoping, hoist with drum layers/line pull/relief/rope bookkeeping S_paid and fall length (section 3.5), and vertical/lateral deflection oscillators (section 3.6). rcl.js: config, confirm/reconfigure gate, states/colours/hysteresis, the full permission matrix, working-range limiter including the tower zone (44.2 m ceiling within 63 m), road zone, bypass, mismatch warnings and counters (section 5). rope.js: add the backward-compatible options {hookMass, ropeEA, deadLength, hookHalf} and setHookBlock(); the tower must stay unchanged.",
+  "interfaces": "charts: LENGTHS, STRUCT, CHARTS, sectionExt, boomMassCG, bodies, ratedStability, rated360, rect, buildChart, chartKey(cfg), permitted(cfg)->{ok,reason}, capacity(cfg,L,R,pinnedK|null)->kg, rminFor(L), rmaxFor(cfg,L), telescopableLoad(L), windPerm(L). boom: class TeleBoom{ext[5],k,phase,activeSection,length,update(dt,cmd,perm)}, cylLen(theta), luffRate(theta,vCyl), headLocal(L,theta,dv,dl,lift)->{u,z,y}. drives: class MobileDrives{psi,psiDot,theta,thetaDot,sPaid,hookVel,dv,dl,freeSlew,pinned,brakeSlew,brakeEvents[];update(dt,levers,perm,ctx{inertia,extTorque,tension,falls,gross,util});fallLength(L,n);ropeLenMin}. rcl: class RCL{config,state,ratio,capKg,grossKg,perm{hoistUp,lower,luffUp,luffDown,teleOut,teleIn,slewL,slewR},warnings:Set,stops:Set,counters{lmiTrips,twoBlockCount,warnTime,bypassUsed,mismatchTime};configure(cfg);confirm();update(dt,snap)} with snap as in section 9.4. HoistSystem(world,wind,opts) and setHookBlock({mass,half})."
+ },
+ {
+  "key": "WP-STAB",
+  "owner_files": [
+   "src/mobile/stability.js",
+   "src/mobile/outriggers.js",
+   "src/mobile/ground.js",
+   "src/mobile/ballast.js",
+   "scripts/test-mobile-stability.mjs"
+  ],
+  "description": "Stability, setup and ground. stability.js: world body list per section 1.3 (the load enters only as rope force at the head), centre-of-pressure computation (section 4.1), supports (floats and tyres, section 4.2), the verified solveSupport pose/reaction solver with hull margin (section 4.3), states FLOAT_LIGHT/LIFTOFF/TIPPING/OVERTURNED (section 4.4), deterministic tip-over rigid rotation about the tipping edge with rope moment, recovery slam and terminal conditions (section 4.5), and a root transform for rendering. outriggers.js: beams with 0/50/100 % detents at 0.20 m/s, the obstruction test against world boxes, jacks (strokes 0.65/0.70 m, J0 0.90 m), mat placement, auto-level (section 4.7), beam-under-load interlock, tyres-clear and floats-set flags. ground.js: bearing zones (section 4.8), job zones API, pressure and settlement/punch-through model. ballast.js: deck stack absorption of cwA/B/C loads (deck zone +/-0.15 m, +/-3 deg), 45 s raise/lower requiring the turntable pin, and the quickBallast option.",
+  "interfaces": "export solveSupport(supports,load,eps)->{ok,plane{z0,a,b},active[],R{id:N}}, hullMargin(act,load); class Stability{state,margin,R,cop,tilt{pitch,roll},phi,phiDot,edge,events[];update(dt,bodiesWorld,ropeForceWorld,headWorld,supports);rootTransform(outMatrix4)}. class Outriggers{beams[4]{ext,target,detent,obstructed},jacks[4]{e,max},mats[4],selected,autoLevel;update(dt,setupInput,actions,world,groundFn);supports(pose)->[{id,x,y,h,k}];tyresClear;floatsSet;detentMin()}. ground: groundAt(x,z)->{kind,allowKPa,ultKPa}, addZone(rect,props), clearZones(), class Settlement{s[4];update(dt,reactionsN,areas,positions)->events}. class Ballast{superKg,deckStack[],raising;canAbsorb(load,carrierPose);absorb(load);startRaise(pinned);startLower(pinned);update(dt)}. Tests: the section 4.3/4.9 reference values."
+ },
+ {
+  "key": "WP-DRIVE",
+  "owner_files": [
+   "src/mobile/vehicle.js",
+   "src/mobile/route.js",
+   "src/world/streets/traffic.js",
+   "src/world/streets/common.js",
+   "src/world/streets/pedestrians.js",
+   "src/world/streets/index.js",
+   "scripts/test-mobile-vehicle.mjs"
+  ],
+  "description": "Carrier driving (section 7). Kinematic multi-axle bicycle model with an ICR reference point per steering program: ROAD x_ref +1.27 with kappa_max 1/8.09 fading to 1/10.6 at 50 km/h; ALL x_ref +2.085 with kappa_max 1/7.08 at 20 km/h or below; CRAB up to 15 deg at 10 km/h or below. Lateral limit 2.5/v^2 and steering rate lock-to-lock 3 s. Longitudinal: 340 kW at the wheel, traction share 0.6, C_rr 0.009/0.025, CdA 8, brakes 4.5 m/s^2, retarder, parking brake, reverse 8 km/h, 12-gear rpm table. Terrain pose from terrain.heightAt at the 10 wheels, and kerb-strike events. OBB collisions against world boxes with the south-fence gate split, plus scrape response and traffic-vehicle contacts. Site/road speed limits. Route guidance chevrons and HUD guidance for the section 8.1 path. Streets: traffic.setObstacles (IDM stopped leader in the lane corridor), traffic.vehicleBoxes, peds.setObstacles, and the CRANE_APPROACH no-parking zone in common.js blocked().",
+  "interfaces": "class Vehicle{pos{x,z},yaw,v,gear,program,rpm,parkingBrake,wheelSteer[5],wheelSpin,kpi{kerb,kerbHard,collisions,scrapes,speedingTime};update(dt,drive{throttle,brake,steer},actions,env{terrain,world,traffic,siteRect,limitKmh})->events[{type,speed,tag}];obb()->{x,z,hx,hz,yaw};wheelWorld(i,side)}. route: buildRouteMarkers(scene)->{group,setVisible}, guidance(pos,yaw)->{distance,text,bearingDeg}. streets.traffic.setObstacles([{x,z,hx,hz,yaw}]), streets.traffic.vehicleBoxes(qx,qz,r,out), streets.peds.setObstacles(list); both exposed from streets/index.js. Test: turning radii 11.47 and 10.18 m +/-0.1 and 0-50 km/h in 25 +/- 3 s."
+ },
+ {
+  "key": "WP-UI",
+  "owner_files": [
+   "src/hud.js",
+   "src/hudMobile.js",
+   "src/input.js",
+   "src/cameras.js",
+   "src/style.css",
+   "index.html"
+  ],
+  "description": "Input profiles (section 6): tower (unchanged), mobile-crane (ISO 7752-2 cross-shift: left stick slew/telescope, right stick luff/hoist; isoHoist honoured), mobile-drive and mobile-setup, with keyboard/gamepad/touch mappings and discrete action maps per profile. Zero-position interlock support for 4 levers. Cameras: attach(rig) re-parents cab/hook cams per machine. New modes driver, chase and setup, plus cab tilt and an overturn cinematic. The mode list comes from machine.cameraModes(). HUD: setMachine(id); main-menu machine selector and jobs grouped by machine; the new MobileHud with ROAD/SETUP/CRANE pages (section 8.8); RCL config, reeving and ballast dialogs; setup checklist panel; cab-screen canvas renderer; mobile touch layout. Results screen gets the setup-checklist block. Tower HUD unchanged when machine = tower.",
+  "interfaces": "input.profile setter; input.levers ({slew,trolley,hoist} or {slew,tele,luff,hoist}); input.drive {throttle,brake,steer}; input.setup {beam,jack}; input.consume() action names per profile (section 6.2-6.4); input.anyLeverOffNeutral works for both lever sets. cameras.attach(rig from machine.cameraRig()), cameras.setModes(list), cameras.update(dt, machine). hud.setMachine(id); hud.update(state), where state.machine==='mobile' routes state.mobile to MobileHud.update(s) with the fields listed in section 8.8. MobileHud.openConfigDialog(cfg, onOk), openReevingDialog(cur, onPick), openBallastPanel(state), drawCabScreen(ctx2d, s). Callbacks to main: onSetting('machine'...), onStartJob(id) (the job carries its machine)."
+ },
+ {
+  "key": "WP-JOBS",
+  "owner_files": [
+   "src/jobs.js",
+   "src/mobile/jobs.js",
+   "src/mobile/jobProps.js",
+   "src/loads.js",
+   "src/loadModels.js",
+   "src/audio.js",
+   "src/signaller.js"
+  ],
+  "description": "Make JobRunner machine-aware: use sim.machine.reset, counters, hoistSpeed and signallerGeometry instead of sim.crane/safety. Add step kinds drive/setup/ballast/reeve/config and def.events timed spawns. Add the mobile KPIs and scoring with critical failures and the setup checklist (section 8.5). Define M1-M6 exactly per section 8.4 in src/mobile/jobs.js, merged into JOBS with machine:'mobile'. jobProps.js spawns job scenery and colliders: P1 markings, ballast truck, HVAC/low-loader/A-frame trailers, the neighbour roof slab/parapets/curb derived from planCity() with a fallback, generator plinth, precast rack, substation plinth and M6 barriers, and ground zones via ground.addZone. loads.js/loadModels.js: new load types from the section 8.4 table. audio.js: updateMobile with engines, hydraulics, relief, outriggers, RCL beeper/long horn, float-light double beep, reverse alarm, creak/crash, and a per-camera mix (section 8.9). signaller.js: geometry argument (slew centre and radial words 'Boom down'/'Boom up') with the legacy tower call preserved.",
+  "interfaces": "JOBS entries {id, title, machine:'tower'|'mobile', brief, par, wind, start (MobileStart), events[{t,run(J)}], setup(J)->steps}. J helpers: spawn, polar (tower), place(x,z) (mobile), prop(name,opts) from jobProps, zone(rect,props). Steps: {kind:'drive',target{x,z,yaw},tol{pos,yawDeg}}, {kind:'setup',require{beams[4],mats,levelDeg,tyresClear}}, {kind:'ballast',cwKg}, {kind:'reeve',block}, {kind:'config',match:'actual'}, plus existing attach/deliver/path/hover. Reads sim.machine.hudState().mobile and mobile.kpi. audio.updateMobile(dt, st), where st = {engine{rpm,load,which}, hyd{demand,relief}, slew, luff, tele, hoist, outrigger{beam,jack,events[]}, rcl, warnings{wind,tilt,support,floatLight}, reverse, horn, events[]}. signaller.update(dt, geom|crane, ref, target, clearY, swing)."
+ }
+]

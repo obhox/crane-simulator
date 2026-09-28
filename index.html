@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b0e12" />
+    <meta name="description" content="Realistic crane simulator in your browser: operate a 60 m jib, 8 t hammerhead tower crane, or drive a 100 t all-terrain mobile crane onto site, set up its outriggers and counterweight and lift with a real RCL. Rope and load pendulum physics, wind, tipping stability and certification-style lift jobs." />
+    <meta name="color-scheme" content="dark" />
+    <title>Crane Simulator · Tower &amp; Mobile</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&family=Rajdhani:wght@500;600;700&display=swap"
+    />
+    <link rel="stylesheet" href="/src/style.css" />
+    <style>
+      /* critical loading-screen styles (shown before style.css / fonts arrive) */
+      html, body { margin: 0; height: 100%; background: #0b0e12; }
+      #loading {
+        position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center;
+        background: radial-gradient(120% 90% at 50% 30%, #18202b 0%, #0b0e12 70%);
+        color: #e8edf2; font-family: Rajdhani, Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        transition: opacity 0.45s ease, visibility 0.45s ease;
+      }
+      #loading.done { opacity: 0; visibility: hidden; }
+      #loading .ld-box { width: min(340px, calc(100vw - 48px)); text-align: center; }
+      #loading .ld-stripe {
+        height: 8px; border-radius: 2px; margin: 0 auto 18px; width: 100%;
+        background: repeating-linear-gradient(-45deg, #f0b40c 0 12px, #14171c 12px 24px);
+        background-size: 34px 34px; animation: ld-move 0.9s linear infinite;
+      }
+      #loading h1 { margin: 0; font-size: 30px; font-weight: 700; letter-spacing: 0.12em; line-height: 1.1; }
+      #loading p { margin: 8px 0 0; font-size: 13px; letter-spacing: 0.22em; color: #8b97a5; text-transform: uppercase; }
+      @keyframes ld-move { to { background-position: 34px 0; } }
+      @media (prefers-reduced-motion: reduce) { #loading .ld-stripe { animation: none; } }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="hud"></div>
+    <div id="touch"></div>
+
+    <div id="loading" role="status" aria-live="polite">
+      <div class="ld-box">
+        <div class="ld-stripe"></div>
+        <h1>TOWER CRANE SIMULATOR</h1>
+        <p>TC-6010 · AT-100 5.1 · loading site…</p>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
