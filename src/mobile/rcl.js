@@ -26,7 +26,7 @@
 
 import { RCL_T, RCL_COLOURS, TOWER_ZONE, HOOK_BLOCKS, DRIVES, AT100 } from './config.js';
 import { SITE } from '../config.js';
-import { lookup, permitted, telescopableLoad, windPermLoad } from './charts.js';
+import { lookup, permitted, teleLoads, windPermLoad } from './charts.js';
 
 const DEG = Math.PI / 180;
 const NEUTRAL = 0.05; // same as Input.anyLeverOffNeutral
@@ -202,14 +202,17 @@ export class RCL {
     const L = S.L ?? AT100.boom.baseLen, R = S.R ?? 0;
     const pinnedK = S.pinnedK ?? null;
     const lk = lookup(cfg, L, R, pinnedK);
-    const teleKg = telescopableLoad(L);
+    // telescopable load per direction: pinned → the stroke about to be entered (checked before
+    // the pins are pulled); between pins → the current stroke (§2.3.8, charts.teleLoads)
+    const tele = teleLoads(L, pinnedK);
+    const teleKg = Math.min(tele.out, tele.in);
     const vPerm = windPermLoad(L, S.loadMassKg || 0, S.loadFaceArea || 0);
     this.grossKg = gross;
     this.netKg = Math.max(0, gross - block.massKg);
     this.capKg = lk.capKg;
     this.ratio = lk.capKg > 0 ? gross / lk.capKg : Infinity;
     const beyondRange = lk.capKg <= 0 || (lk.rmax > 0 && R > lk.rmax + 1e-9);
-    this.info = { ...lk, shortCode: this.shortCode, teleKg, windPerm: vPerm, unpinned: pinnedK === null, block: cfg.block };
+    this.info = { ...lk, shortCode: this.shortCode, teleKg, teleOutKg: tele.out, teleInKg: tele.in, windPerm: vPerm, unpinned: pinnedK === null, block: cfg.block };
     const suspended = S.suspended ?? (S.loadAttached ? !S.loadGrounded : !S.hookGrounded);
 
     // --------------------------------------------- STOP latch with hysteresis
@@ -246,14 +249,14 @@ export class RCL {
     const cap = (k, v) => { if (v < p[k]) p[k] = v; };
     const capAll = (v) => { for (const k of PERM_KEYS) cap(k, v); };
     for (const k of PERM_KEYS) p[k] = 1;
-    const overTele = gross > teleKg;
+    const overOut = gross > tele.out, overIn = gross > tele.in;
 
     if (!powered) { capAll(0); stops.add('POWER'); }
     else if (this.bypass) {
       capAll(RCL_T.bypassScale);
     } else {
       if (!cfg.confirmed) {
-        // 'noconfig': only lower and tele-in (tele-in still needs gross ≤ T_tel)
+        // 'noconfig': only lower and tele-in (pinned, tele-in still needs gross ≤ T_tel of the stroke below)
         for (const k of ['hoistUp', 'luffUp', 'luffDown', 'teleOut', 'slewL', 'slewR']) cap(k, 0);
         stops.add('NO_CONFIG');
       }
@@ -272,7 +275,19 @@ export class RCL {
       // beyond the working range nothing may be lifted (the RCL cannot know what hangs there)
       if (beyondRange) { cap('hoistUp', 0); cap('luffDown', 0); cap('teleOut', 0); stops.add('RANGE'); }
       if (R < lk.rmin - 1e-9) { cap('luffUp', 0); stops.add('RMIN'); }
-      if (overTele) { cap('teleOut', 0); cap('teleIn', 0); stops.add('TELE_LOAD'); }
+      // TELE LOAD: pinned, each direction is checked against the stroke it would start, so an
+      // over-limit load never unpins the boom. Between pins (a load picked up while the boom is
+      // held by the cylinder) tele-out stops but tele-in stays: the boom can always retract onto
+      // the lower pin. The stop shows while the blocked direction is requested, or always when
+      // no telescoping is possible at all / the boom is unpinned over the limit.
+      const telLev = lev.tele || 0;
+      if (pinnedK === null) {
+        if (overOut) { cap('teleOut', 0); stops.add('TELE_LOAD'); }
+      } else {
+        if (overOut) cap('teleOut', 0);
+        if (overIn) cap('teleIn', 0);
+        if ((overOut && overIn) || (overOut && telLev > NEUTRAL) || (overIn && telLev < -NEUTRAL)) stops.add('TELE_LOAD');
+      }
       this.workingRange(S, L, R);
     }
     if (powered) {
@@ -287,8 +302,11 @@ export class RCL {
     }
 
     // ---------------------------------------------- counters and warnings
+    // upper-limit trip (KPI): the hook driven into the limit by HOISTING. Telescoping out raises
+    // the hook by ΔL/n and is stopped by the same switch, but that is a normal limiter action
+    // (pay out rope while telescoping), not an anti-two-block trip.
     const top = !!S.twoBlock;
-    if (top && !this._prevTwoBlock && ((lev.hoist || 0) > NEUTRAL || (lev.tele || 0) > NEUTRAL)) {
+    if (top && !this._prevTwoBlock && (lev.hoist || 0) > NEUTRAL) {
       this.counters.twoBlockCount++; this.events.push('upperLimit');
     }
     this._prevTwoBlock = top;

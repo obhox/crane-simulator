@@ -50,12 +50,14 @@ import {
 
 const PAGE_OF = { ROAD: 'road', SETUP: 'setup', CRANE: 'crane', TIPPING: 'crane', OVERTURNED: 'crane' };
 const STATE_COL = { noconfig: '#8e98a3', blue: RCL_COLOURS.blue, ok: RCL_COLOURS.ok, warn: RCL_COLOURS.warn, stop: RCL_COLOURS.stop };
-const STATE_TEXT = { noconfig: 'NO CONFIG', blue: 'RECONFIG OK', ok: 'OK', warn: 'PRE-WARNING', stop: 'LMB STOP' };
+const STATE_TEXT = { noconfig: 'NO CONFIG', blue: 'RECONFIG OK', ok: 'OK', warn: 'PRE-WARNING', stop: 'RCL STOP' };
+// 'stop' with the working-range stop = hook beyond the chart (e.g. boom on its rest at power-on): not an overload
+const stateText = (state, stops) => (state === 'stop' && stops && stops.has('range') ? 'OUTSIDE CHART' : STATE_TEXT[state] || String(state).toUpperCase());
 
 /** Display text for RCL stop / warning ids (hudState().mobile.rcl.stops / .warnings). */
 export const RCL_LABELS = {
   // stops: motions blocked
-  lmb: 'LMB STOP', hookLimit: 'HOOK LIMIT', range: 'WORKING RANGE', teleLoad: 'TELE LOAD', blockRating: 'BLOCK RATING',
+  lmb: 'RCL STOP', hookLimit: 'HOOK LIMIT', range: 'WORKING RANGE', teleLoad: 'TELE LOAD', blockRating: 'BLOCK RATING',
   noConfig: 'NO CONFIG', notPermitted: 'CONFIG NOT PERMITTED', lowerLimit: 'LOWERING LIMIT', zone: 'TOWER ZONE', roadZone: 'ROAD ZONE',
   boomContact: 'BOOM CONTACT', hoistOverload: 'HOIST OVERLOAD', pinned: 'TURNTABLE PINNED', luffStop: 'LUFF END STOP',
   // warnings: never blocking
@@ -63,7 +65,7 @@ export const RCL_LABELS = {
   floatLifted: 'FLOAT LIFTED', sidePull: 'SIDE PULL', unpinned: 'TELE / NOT PINNED', reeving: 'REEVING CHANGED — CONFIRM CONFIG',
   bypass: 'RCL BYPASS', settlement: 'SETTLEMENT', slewSpeed: 'SLEW SPEED',
 };
-const STOP_ICONS = [['lmb', 'LMB'], ['hookLimit', 'HOOK'], ['range', 'RANGE'], ['teleLoad', 'TELE']];
+const STOP_ICONS = [['lmb', 'RCL'], ['hookLimit', 'HOOK'], ['range', 'RANGE'], ['teleLoad', 'TELE']];
 const WARN_ICONS = [['support', 'SUPPORT'], ['tilt', 'TILT'], ['wind', 'WIND'], ['tyres', 'TYRES']];
 
 // ------------------------------------------------------------------ helpers
@@ -453,8 +455,10 @@ export function drawCabScreen(x, s, W = x.canvas.width, H = x.canvas.height) {
   x.fillStyle = '#ffb020'; x.fillRect(12 + 296 * 0.9 / 1.2, 112, 2, 26);
   x.fillStyle = '#ff3030'; x.fillRect(12 + 296 / 1.2, 112, 2, 26);
   x.fillStyle = '#e8fff2'; x.font = 'bold 13px monospace';
-  x.fillText(`${Math.round(ratio * 100)} %  ${STATE_TEXT[state] || ''}`, 120, 130);
-  const stops = [...toSet(rcl.stops)].map((id) => RCL_LABELS[id] || String(id).toUpperCase());
+  const stopSet = toSet(rcl.stops);
+  const outside = state === 'stop' && stopSet.has('range');
+  x.fillText(`${outside ? '—' : `${Math.round(ratio * 100)} %`}  ${stateText(state, stopSet)}`, 120, 130);
+  const stops = [...stopSet].map((id) => RCL_LABELS[id] || String(id).toUpperCase());
   const warns = [...toSet(rcl.warnings)].map((id) => RCL_LABELS[id] || String(id).toUpperCase());
   x.font = 'bold 12px monospace';
   x.fillStyle = '#ff6b5e'; x.fillText(stops.join(' · ').slice(0, 42), 10, 160);
@@ -932,8 +936,10 @@ export class MobileHud {
     setHidden(E.conf, !cfg || !!cfg.confirmed);
     setData(E.bar, 'state', state);
     E.bar.style.setProperty('--st', col);
-    setText(E.stateLbl, STATE_TEXT[state] || String(state).toUpperCase());
-    setText(E.util, String(Math.round(ratio * 100)));
+    const stopSet = toSet(rcl.stops);
+    const outside = state === 'stop' && stopSet.has('range');
+    setText(E.stateLbl, stateText(state, stopSet));
+    setText(E.util, outside ? '—' : String(Math.round(ratio * 100)));
     const f = Math.round((Math.min(ratio, 1.2) / 1.2) * 400) / 400;
     setStyle(E.fill, 'transform', `scaleX(${f})`);
     setText(E.gross, tFmt(grossKg));
@@ -1135,6 +1141,7 @@ export class MobileHud {
       if (anyMatMissing) H.push(['X', 'place mat', 'info']);
       if (su.floatsSet && tilt > LEVEL.okDeg) H.push(['G', 'hold to auto-level', 'warn']);
       if ((m.ballast?.deckStack || []).length) H.push(['B', 'hold to raise ballast (pinned)', 'info']);
+      if (m.ballast?.raising) H.push(['Z', 'hold with B for ×4 time', 'info']);
       if (su.floatsSet && su.tyresClear && tilt <= LEVEL.okDeg) H.push(['Enter', 'enter the crane cab', 'good']);
       else H.push(['⌫', 'back to road mode', 'info']);
       return H;
@@ -1151,9 +1158,17 @@ export class MobileHud {
     if (s.attachable) H.push(['R', 'hook on', 'good']);
     if (s.canRelease) H.push(['R', 'release', 'good']);
     const stops = toSet(rcl.stops);
-    if (rcl.state === 'stop' || stops.has('lmb')) H.push(['', 'RCL STOP — lower, luff up or telescope in', 'bad']);
+    if (stops.has('range')) H.push(['←', 'Outside the load chart — luff up to bring the hook back in range', 'warn']);
+    else if (rcl.state === 'stop' || stops.has('lmb')) H.push(['', 'RCL STOP — lower, luff up or telescope in', 'bad']);
     if (stops.has('hookLimit') || (s.twoBlock && !m.stowed)) H.push(['', 'Hook limit — hoist down', 'warn']);
     if (stops.has('teleLoad')) H.push(['', 'Tele load — land the load before telescoping', 'warn']);
+    if (stops.has('zone')) {
+      const ceil = num(m.zone?.ceiling, TOWER_ZONE.ceiling).toFixed(1);
+      if (m.zone?.inTowerZone === false) H.push(['→', `Tower-crane zone ahead (head ≤ ${ceil} m) — luff down or telescope in first`, 'warn']);
+      else H.push(['→', `Tower-crane ceiling ${ceil} m — luff down to telescope further`, 'warn']);
+    }
+    if (stops.has('roadZone')) H.push(['', 'Road zone limit — keep boom head, hook and load over the site', 'warn']);
+    if (m.reeving) H.push(['Z', 'hold for ×4 time while the riggers re-reeve', 'info']);
     if (toSet(rcl.warnings).has('support')) H.push(['L', 'support ≠ config — check beams / RCL', 'warn']);
     if (s.power && neutral && !s.loadName && !m.stowed) H.push(['Enter', 'outrigger remote', 'info']);
     return H;
@@ -1195,6 +1210,8 @@ export class MobileHud {
     this._ballastOpen = true;
     this._ballastSeed = state || {};
     this._ballastMoved = false;
+    this._ballastDoneAt = 0;
+    setClass(this.el.bal, 'done', false);
     setHidden(this.el.bal, false);
     this._updateBallast(this._lastS?.mobile || {});
   }
@@ -1241,7 +1258,8 @@ export class MobileHud {
   <span class="cfg-label">${esc(r.label)}</span>
   <div class="cfg-opts" role="radiogroup" aria-label="${esc(r.label)}">${r.opts.map(([v, t]) => `<button type="button" role="radio" data-row="${ri}" data-opt="${esc(v)}" aria-checked="${String(c[r.key]) === String(v)}"${r.off ? ' disabled' : ''}>${esc(t)}</button>`).join('')}</div>
 </div>`).join('') + `
-<p class="cfg-note">Enter the <b>actual</b> set-up. The RCL senses the beams but cannot check the counterweight or the reeving.${sensed ? ` Beams sensed: ${FLOATS.map((f, i) => `${f.id} ${Math.round(num(sensed[i]) * 100)}`).join(' · ')} %.` : ''}</p>`;
+<p class="cfg-note">Enter the <b>actual</b> set-up. The RCL senses the beams but cannot check the counterweight or the reeving.${sensed ? ` Beams sensed: ${FLOATS.map((f, i) => `${f.id} ${Math.round(num(sensed[i]) * 100)}`).join(' · ')} %.` : ''}</p>
+<p class="cfg-keys"><kbd>↑</kbd><kbd>↓</kbd> row · <kbd>←</kbd><kbd>→</kbd> value · <kbd>Enter</kbd> confirm · <kbd>Esc</kbd> cancel</p>`;
     // live pre-check (the RCL itself refuses on OK); any edit clears an old refusal
     const p = d.opts.permitted ? d.opts.permitted(c) : null;
     if (p && p.ok === false) this._msg(`NOT PERMITTED: ${p.reason || 'configuration not permitted'}`, 'warn');
@@ -1277,7 +1295,8 @@ export class MobileHud {
       return `<button type="button" class="rv-item${i === d.row ? ' focus' : ''}${cur ? ' cur' : ''}" data-pick="${i}">
   <span class="rv-k">${i + 1}</span><b>${esc(b.name)}</b><span>${b.falls} ${b.falls === 1 ? 'fall' : 'falls'}</span><span>${(b.ratedKg / 1000).toFixed(1)} t</span><span>${b.massKg} kg</span><span>${cur ? 'CURRENT' : `${reeveTime(d.cur, id)} s`}</span>
 </button>`;
-    }).join('')}</div><p class="cfg-note">Only with the block landed and no load on the hook. The riggers re-reeve; then confirm the RCL configuration.${d.opts.note ? ` ${esc(d.opts.note)}` : ''}</p>`;
+    }).join('')}</div><p class="cfg-note">Only with the block landed and no load on the hook. The riggers re-reeve; then confirm the RCL configuration.${d.opts.note ? ` ${esc(d.opts.note)}` : ''}</p>
+<p class="cfg-keys"><kbd>↑</kbd><kbd>↓</kbd> select · <kbd>1</kbd>–<kbd>4</kbd> pick · <kbd>Enter</kbd> confirm · <kbd>Esc</kbd> cancel</p>`;
   }
 
   _msg(text, kind = 'bad') {
@@ -1379,8 +1398,17 @@ export class MobileHud {
     // RCL ≠ superstructure CW → configure (step 1 before a raise, step 4 after)
     const rclCw = num(b.rclCwKg, num(m.rcl?.config?.cwKg, superKg));
     if (r) this._ballastMoved = true;
-    const step = r || deck.length ? 2 : rclCw !== superKg ? (this._ballastMoved ? 3 : 0) : 1;
+    // finished: the stack is up, nothing left on the deck and the RCL is set (and confirmed) for it
+    const confirmed = m.rcl?.config ? m.rcl.config.confirmed !== false : true;
+    const done = this._ballastMoved && !r && !deck.length && rclCw === superKg && confirmed;
+    const step = done ? E.bSteps.length : r || deck.length ? 2 : rclCw !== superKg ? (this._ballastMoved ? 3 : 0) : 1;
     E.bSteps.forEach((li, i) => { setClass(li, 'cur', i === step); setClass(li, 'done', i < step); });
+    setClass(E.bal, 'done', done);
+    // … then the panel closes itself after a few seconds
+    const now = performance.now();
+    if (!done) this._ballastDoneAt = 0;
+    else if (!this._ballastDoneAt) this._ballastDoneAt = now;
+    else if (now - this._ballastDoneAt > 5000) this.closeBallastPanel();
   }
 
   // ------------------------------------------------------------- cab screen

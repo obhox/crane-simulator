@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { toCreasedNormals } from 'three/addons/utils/BufferGeometryUtils.js';
 import { Kit, mBox, mCyl, mTorus, mExtrude, boltGeo, sweepGeo, WEAR_JOINT, WEAR_LIGHT, TAU } from '../crane/kit.js';
 import { AT100, AXLES, FLOATS, BASES, FLOAT_X, CW_SLABS, CW_DECK, VEHICLE } from './config.js';
 import {
@@ -39,10 +40,12 @@ import {
 // Pose API (all optional; call any subset per frame, then render):
 //   setCarrierPose(x, y, z, yaw, pitch, roll)   y = world height of the carrier origin (ground + lift)
 //   setSlew(ψ) · setBoom(θ, p[6], dv, dl) · setLuff(θ) · setTele(p[6]) · pFromExt(ext[5]) → p[6]
-//   setBeam(i, |y|) · setBeamExt(i, 0..1) · setJack(i, e) · setWheels(steer[5], spin, κ?) · setSteeringWheel(a)
+//   setBeam(i, |y|) · setBeamExt(i, 0..1) · setJack(i, e) · setSteeringWheel(a)
+//   setWheels(steer[5], spin, κ?, ground[10]?)  ground = Vehicle.wheelGround → per-wheel suspension travel
 //   setCabTilt(rad) · setSticks({slew, tele, luff, hoist}) · setCounterweight(superIds, deckIds, raise01)
 //   setMat(i, 'none'|'carried'|'composite', x, y, z, yaw) · floatWorld(i, out) · setWinch(sPaid)
-//   updateAnemometer(dt, windSpeed) · setLights({t, night, beacons, work}) · setTip(Matrix4|null)
+//   updateAnemometer(dt, windSpeed) · setLights({t, night, beacons, work, flood?, head?}) · setTip(Matrix4|null)
+//   aimFlood(x, y, z | null)   boom-flood aim point (world); default: the ground under the head
 //   fallTops(block, out) · ropeLead(out) · headWorld(out)
 
 const C = AT100.carrier;
@@ -87,8 +90,9 @@ function buildCarrierKit(k, M, atlas, carrier, chrome) {
   // chassis box girder, decks, deck-edge fascia
   k.box('cabFrame', FRAME.x1 - FRAME.x0, FRAME.y1 - FRAME.y0, 2 * FRAME.hz, (FRAME.x0 + FRAME.x1) / 2, (FRAME.y0 + FRAME.y1) / 2, 0, null, WEAR_LIGHT);
   const deck = (x0, x1, z0, z1, y = DECK_Y) => k.box('galv', x1 - x0, 0.06, z1 - z0, (x0 + x1) / 2, y - 0.03, (z0 + z1) / 2);
-  deck(-2.52, DCAB.x0 - 0.02, -HW, -FRAME.hz); // left (up to the driver cab)
-  deck(-2.52, 6.35, FRAME.hz, HW); // right (up to the front bonnet)
+  // side decks stop inside the 0.03 m fascia (a shared outer face would z-fight)
+  deck(-2.52, DCAB.x0 - 0.02, -HW + 0.03, -FRAME.hz); // left (up to the driver cab)
+  deck(-2.52, 6.35, FRAME.hz, HW - 0.03); // right (up to the front bonnet)
   deck(1.22, 6.35, -FRAME.hz, FRAME.hz); // centre, in front of the slew ring
   for (const s of [-1, 1]) {
     const x1 = s < 0 ? DCAB.x0 : 6.35;
@@ -141,13 +145,14 @@ function buildCarrierKit(k, M, atlas, carrier, chrome) {
       lamp(k, 'work', 0.08, 0.05, V(xc + (x1 - x0) / 2 + 0.081, BOX_Y[1] - 0.05, s * (BOX_HALF - 0.06)), V(1, -0.6, s * 0.8));
     }
   });
-  // outrigger control panels with bubble levels (both sides, behind the front box)
+  // outrigger control panels with bubble levels (both sides, behind the front box), on the
+  // deck edge above the access steps (left) / fuel tank (right), standing 5 cm proud of the fascia
   for (const s of [-1, 1]) {
-    k.box('grey', 0.3, 0.3, 0.06, 3.95, 1.25, s * (HW - 0.03), null, WEAR_LIGHT);
-    decal(k, atlas, 'level', 0.12, 0.12, V(3.95, 1.3, s * (HW + 0.001)), V(0, 0, s));
+    k.box('grey', 0.3, 0.3, 0.06, 3.95, 1.52, s * (HW + 0.02), null, WEAR_LIGHT);
+    decal(k, atlas, 'level', 0.12, 0.12, V(3.95, 1.57, s * (HW + 0.051)), V(0, 0, s));
   }
   // slewing ring base, ring gear, bearing
-  k.cyl('cabFrame', 1.2, 0.55, 0, 1.825, 0, 'y', 40, WEAR_LIGHT);
+  k.cyl('cabFrame', 1.2, 0.54, 0, 1.82, 0, 'y', 40, WEAR_LIGHT); // top 2.09, under the ring gear's 2.10
   k.cyl('darkSteel', 1.26, 0.12, 0, 2.04, 0, 'y', 48);
   k.cyl('darkSteel', 1.18, 0.15, 0, 2.175, 0, 'y', 40);
   k.detail = true;
@@ -180,7 +185,7 @@ function buildCarrierKit(k, M, atlas, carrier, chrome) {
   k.box('yellow', 0.14, 0.1, 0.62, 5.2, 3.07, 0, null, WEAR_PLATE);
   // rear: ballast deck (top 1.85), engine body with radiator, lamps, under-run bar
   k.box('galv', 1.22, 0.05, 2.6, -3.11, DECK_REAR - 0.025, 0);
-  for (const s of [-1, 1]) k.box('yellow', 1.22, 0.08, 0.04, -3.11, DECK_REAR - 0.04, s * 1.3, null, WEAR_LIGHT);
+  for (const s of [-1, 1]) k.box('yellow', 1.22, 0.08, 0.04, -3.11, DECK_REAR - 0.034, s * 1.3, null, WEAR_LIGHT); // lips 6 mm proud of the deck
   k.add('yellow', rbox(0.69, 1.28, 2.6, 0.06).translate(-3.355, 1.15, 0), null, WEAR_LIGHT);
   decal(k, atlas, 'louvre', 1.3, 0.55, V(-3.702, 1.3, 0), V(-1, 0, 0));
   for (const s of [-1, 1]) {
@@ -212,8 +217,9 @@ function buildCarrierKit(k, M, atlas, carrier, chrome) {
 function buildUpperKit(k, M, atlas) {
   // turntable, deck plates, cab bracket
   k.cyl('yellow', 1.25, 0.12, 0, 0.06, 0, 'y', 40, WEAR_LIGHT);
-  k.box('galv', 1.6, 0.05, 0.93, 0.45, 0.095, 0.905); // right front deck
-  k.box('galv', 2.0, 0.05, 0.93, -1.45, 0.095, -0.905); // left rear deck (under the hydraulic tank)
+  // deck plates lie ON the turntable (tops 0.128 vs its 0.12): coplanar tops z-fight
+  k.box('galv', 1.6, 0.05, 0.93, 0.45, 0.103, 0.905); // right front deck
+  k.box('galv', 2.0, 0.05, 0.93, -1.45, 0.103, -0.905); // left rear deck (under the hydraulic tank)
   k.box('darkSteel', 0.14, 0.1, 0.7, CRANE_CAB_POS.x, 0.1, CRANE_CAB_POS.z); // cab tilt hinge block
   const plate = (pts, z0, t = 0.08) => {
     const sh = new THREE.Shape(pts.map(([x, y]) => new THREE.Vector2(x, y)));
@@ -228,17 +234,17 @@ function buildUpperKit(k, M, atlas) {
   const RP = [[-2.55, 0.12], [-0.6, 0.12], [-0.6, 0.55], [-1.3, 1.05], [-1.62, 1.62], [-1.95, 1.76], [-2.35, 1.72], [-2.55, 1.5]];
   plate(RP, 0.47); plate(RP, -0.55);
   for (const s of [-1, 1]) {
-    k.box('yellow', 0.08, 0.43, 0.19, -0.8, 0.335, s * 0.455, null, WEAR_PLATE); // narrow → wide transition
+    k.box('yellow', 0.08, 0.42, 0.186, -0.8, 0.335, s * 0.455, null, WEAR_PLATE); // narrow → wide transition (faces inside the plates')
     k.cyl('yellow', 0.26, 0.07, PIVOT.x, PIVOT.y, s * 0.585, 'z', 20, WEAR_PLATE);
   }
   k.cyl('darkSteel', 0.12, 1.36, PIVOT.x, PIVOT.y, 0, 'z', 14);
   // tail: girders, top plate, counterweight frame underside (slabs hang below y 1.15)
   for (const s of [-1, 1]) {
-    k.box('yellow', 1.2, 0.4, 0.08, -3.15, 1.35, s * 0.51, null, WEAR_PLATE);
-    k.box('yellow', 0.9, 0.4, 0.08, -3.0, 1.35, s * 1.24, null, WEAR_PLATE);
+    k.box('yellow', 1.2, 0.39, 0.08, -3.15, 1.355, s * 0.51, null, WEAR_PLATE); // bottoms 1 cm inside the frame underside
+    k.box('yellow', 0.9, 0.39, 0.08, -3.0, 1.355, s * 1.24, null, WEAR_PLATE);
     decal(k, atlas, 'keepclear', 0.3, 0.264, V(-3.0, 1.35, s * 1.281), V(0, 0, s));
   }
-  k.box('yellow', 0.12, 0.42, 2.56, -2.6, 1.36, 0, null, WEAR_PLATE);
+  k.box('yellow', 0.12, 0.40, 2.54, -2.6, 1.36, 0, null, WEAR_PLATE); // cross girder: top under the top plate's, ends inside the side girders
   const top = mExtrude(tailShape(0.63, 1.3, false), 0.05, { curveSegments: 4 });
   top.rotateX(-Math.PI / 2).translate(CW_U, 1.52, 0);
   k.add('yellow', top, null, WEAR_LIGHT);
@@ -258,8 +264,8 @@ function buildUpperKit(k, M, atlas) {
   k.cyl('cabFrame', 0.12, 0.12, WINCH.x, WINCH.y, 0.69, 'z', 16);
   // engine housing (right) with louvres, radiator grille, exhaust, handrail
   k.add('yellow', rbox(2.1, 1.0, 0.75, 0.07, 3).translate(-1.4, 0.62, 0.995), null, WEAR_LIGHT);
-  decal(k, atlas, 'louvre', 0.8, 0.35, V(-1.95, 0.72, 1.371), V(0, 0, 1));
-  decal(k, atlas, 'louvre', 0.8, 0.35, V(-0.85, 0.72, 1.371), V(0, 0, 1));
+  decal(k, atlas, 'louvre', 0.8, 0.33, V(-1.95, 0.71, 1.371), V(0, 0, 1)); // below the wordmark (no overlapping decals)
+  decal(k, atlas, 'louvre', 0.8, 0.33, V(-0.85, 0.71, 1.371), V(0, 0, 1));
   decal(k, atlas, 'wordmark', 1.4, 0.196, V(-1.4, 0.98, 1.371), V(0, 0, 1));
   decal(k, atlas, 'grille', 0.5, 0.5, V(-1.0, 1.121, 0.99), V(0, 1, 0));
   k.member('black', V(-2.1, 1.1, 1.2), V(-2.1, 1.62, 1.2), { k: 'tube', r: 0.05, seg: 10 }, null, 0);
@@ -300,7 +306,9 @@ function profilePath(p, w, h, r = 0.05) {
   return p;
 }
 function extrudeAlongX(shape, x0, x1) {
-  const g = mExtrude(shape, x1 - x0, { curveSegments: 12 });
+  // ExtrudeGeometry is non-indexed → flat-shaded facets across the round bottom;
+  // creased normals smooth the arc (15° steps) and keep the walls / end caps crisp
+  const g = toCreasedNormals(mExtrude(shape, x1 - x0, { curveSegments: 12 }), Math.PI / 6);
   g.translate(0, 0, x0);
   g.rotateY(Math.PI / 2); // extrusion z → boom +x
   return g;
@@ -647,16 +655,30 @@ export function buildMobileCrane(mats) {
   }
   const head = buildHead(M, atlas);
   sections[5].add(head);
-  // boom floodlight: lights the ground under the head at night
-  const spot = new THREE.SpotLight(0xf4f7ff, 0, 90, 0.42, 0.6, 1.2);
+  // boom floodlight: lights the hook's landing area at night. The target lives in
+  // root (= world) and is re-aimed every setLights() at the ground under the head
+  // (or at the point given to aimFlood(), e.g. the hook / load on the ground).
+  const spot = new THREE.SpotLight(0xf4f7ff, 0, 110, 0.5, 0.55, 1.2); // cone ±28.6°
   spot.name = 'boomFlood';
   spot.castShadow = false;
   spot.position.set(FLOOD.x + 0.15, FLOOD.y - 0.02, -(SECTION(0).w / 2 + 0.07));
   sections[0].add(spot);
   const spotTarget = new THREE.Object3D();
-  spotTarget.position.set(0, -12, 0);
-  head.headCamMount.add(spotTarget);
+  spotTarget.name = 'boomFloodTarget';
+  root.add(spotTarget);
   spot.target = spotTarget;
+  let floodAim = null; // world point from aimFlood(), or null = ground under the head
+  // dipped headlamps: one spot between the two bumper lamps (the pools of lamps 1.9 m
+  // apart merge a few metres ahead); axis 1° below the horizon with a soft rim so the
+  // road right in front is not blown out (3500 cd: ~15 lx at 3 m, ~3 lx at 10 m; cf. the
+  // site floods' ~57 lx at their aim point); carrier frame
+  const headBeam = new THREE.SpotLight(0xfff6e8, 0, 80, 0.30, 0.9, 2);
+  headBeam.name = 'headlamps';
+  headBeam.castShadow = false;
+  headBeam.position.set(7.80, 0.87, 0);
+  carrier.add(headBeam);
+  headBeam.target.position.set(47.8, 0.87 - 40 * Math.tan(Math.PI / 180), 0);
+  carrier.add(headBeam.target);
 
   // --- instanced chrome rods and beacons
   inst.add('chrome', [{ geometry: unitRodGeometry(), material: M.chrome }], chrome);
@@ -735,8 +757,24 @@ export function buildMobileCrane(mats) {
      * steer[5]: centreline wheel angles (rad, + = left, Vehicle.wheelSteer); spin: rolled
      * angle (rad, + forward); kappa: path curvature (1/m, + left) for per-side Ackermann —
      * estimated from the axle angles (tan δ = (x − x_ref)·κ) when omitted.
+     * ground[10] (optional, Vehicle.wheelGround: world ground height under wheel axle·2 + right):
+     * each wheel rides its own suspension travel (+0.10 bump / −0.08 droop) so tyres follow
+     * kerbs instead of the carrier's best-fit plane; needs setTip()/setCarrierPose() first.
      */
-    setWheels(steer, spin = 0, kappa = null) {
+    setWheels(steer, spin = 0, kappa = null, ground = null) {
+      if (ground) {
+        carrier.updateWorldMatrix(true, false);
+        const e = carrier.matrixWorld.elements, ey = e[5] > 0.2 ? e[5] : 1; // local +y → world y
+        for (let j = 0; j < 5; j++) {
+          for (let s = 0; s < 2; s++) {
+            const w = wheels[j][s];
+            // contact point (x, 0, z) of this wheel on the carrier-fixed plane
+            const yc = e[1] * w.position.x + e[9] * w.position.z + e[13];
+            const g = ground[j * 2 + s];
+            w.position.y = TYRE_R + (Number.isFinite(g) ? clamp((g - yc) / ey, -0.08, 0.10) : 0);
+          }
+        }
+      }
       let k = kappa;
       if (k === null) {
         let sx = 0, st = 0, sxx = 0, sxt = 0;
@@ -807,12 +845,37 @@ export function buildMobileCrane(mats) {
       head.sheave.rotation.z = -sPaid / SHEAVE.r;
     },
     updateAnemometer(dt, speed) { head.anemometer.rotation.y += speed * dt * 1.8; },
-    /** beacons: rotating-beacon flashes; work: lamps (head / tail / work LEDs) + boom flood at night */
-    setLights({ t = 0, night = 0, beacons: on = false, work = false } = {}) {
+    /**
+     * beacons: rotating-beacon flashes; work: lamps (head / tail / work LEDs) at night;
+     * flood: boom floodlight (default: work, but off while the boom lies on its rest in travel trim);
+     * head: dipped-beam headlamps (default: beacons && work, i.e. engine / power on at night).
+     * Call after the pose setters (it re-aims the boom flood from the posed head).
+     */
+    setLights({ t = 0, night = 0, beacons: on = false, work = false, flood, head: dipped } = {}) {
       const flash = Math.pow(Math.max(0, Math.cos(t * TAU * 1.3)), 6);
       M.beacon.emissiveIntensity = on ? 0.4 + 7 * flash : 0.03;
       M.lamps.emissiveIntensity = work ? 2.5 + 4 * night : 0;
-      spot.intensity = work && night > 0.3 ? 2600 * night : 0;
+      const onRest = state.theta < 0.01 && state.p[5] < 0.05; // boom stowed on the rest (road trim)
+      // 1500: now that it lands on the ground ~10–40 m off (not the sky) — about the site floods' pool
+      spot.intensity = (flood ?? (work && !onRest)) && night > 0.3 ? 1500 * night : 0;
+      headBeam.intensity = (dipped ?? (on && work)) && night > 0.3 ? 3500 * night : 0;
+      if (spot.intensity > 0) {
+        if (floodAim) spotTarget.position.copy(floodAim);
+        else {
+          // ground under the head: the lowest supporting point (pads on the ground / mats
+          // when set up; the carrier origin = ground level on tyres)
+          head.getWorldPosition(_v);
+          let g = carrier.localToWorld(_w.set(0, 0, 0)).y;
+          for (const fl of floats) g = Math.min(g, fl.getWorldPosition(_w).y);
+          spotTarget.position.set(_v.x, g, _v.z);
+        }
+        spotTarget.updateMatrixWorld();
+      }
+    },
+    /** boom flood aim point (world), e.g. the ground under the hook or the load; null = under the head */
+    aimFlood(x = null, y = 0, z = 0) {
+      if (x === null) floodAim = null;
+      else (floodAim ||= new THREE.Vector3()).set(x, y, z);
     },
     /**
      * Rope exit points on the head sheaves for the falls of `block` (a

@@ -310,6 +310,14 @@ export function resolveStart(start) {
 const R = Math.PI / 2;
 const pad = (o) => ({ preset: 'pad', ...o }); // at P1, set up, carried mats, level, RCL pre-filled (unconfirmed)
 
+// Precast panels on the A-frame trailer (trailer-local frame: x forward, z across).
+// PANEL_X: 0.4 m toward the trailer's rear. Centred, the 4 m panels' front ends
+// reached 0.1 m into the tractor chassis collider, and a load that starts inside
+// a collider is shot out when it is hooked on (M4 and free play).
+const PANEL_X = -0.4;
+const PANEL_SLOTS_M4 = [-0.45, 0.72, 0.45];
+const PANEL_SLOTS_FREE = [-0.45, 0.45];
+
 // ------------------------------------------------------------ the jobs (§8.4)
 export const MOBILE_JOBS = [
   {
@@ -348,7 +356,7 @@ export const MOBILE_JOBS = [
       return [
         { kind: 'attach', load: cwC, text: 'Rig counterweight slab C (11.5 t) on the ballast truck: lower the 26 t block and hook on (R).' },
         { kind: 'deck', load: cwC, text: 'Boom over the rear: land slab C on the carrier deck (±0.15 m, ±3°) and release it.' },
-        { kind: 'ballast', cwKg: 35000, text: 'Slew to 0°, pin the turntable (T) and hold B: the ballasting cylinders lift the stack into the frame (35.0 t).' },
+        { kind: 'ballast', cwKg: 35000, text: 'Slew to 0° and pin the turntable (T), then Enter for the outrigger remote (SETUP) and hold B: the ballasting cylinders lift the stack into the frame (35.0 t).' },
         { kind: 'config', match: 'actual', text: 'Unpin (T) and enter the new configuration in the RCL (L): OR B100 CW35.0 with the 26 t block — confirm.' },
         { kind: 'boom', length: 45.0, text: 'Telescope to 45.0 m (pinned) before rigging — extend first, then load. A shorter boom leaves the unit almost no clearance over the parapet.' },
         { kind: 'attach', load: hvac, text: 'Hook on the HVAC unit on the delivery truck. Inside the tower-crane zone the head is capped at 44.2 m: luff out to R ≈ 20 m before slewing over the truck.' },
@@ -379,15 +387,14 @@ export const MOBILE_JOBS = [
     par: 780, wind: 5, gust: 0.7,
     start: pad({ cwKg: 23500, rcl: { mode: 'outriggers', base: 100, cwKg: 23500, block: 'ball', confirmed: false }, block: 'ball', boomK: 3, luffDeg: 55, slewDeg: 0, ropeLen: 12 }),
     setup: (J) => {
-      const tr = J.prop('aFrameTrailer', { x: 44.0, z: -25.0, yaw: -R });
-      const y = tr.info.bedY;
-      // A-frame: two panels on the west side, one on the east side of the spine
+      // A-frame (vertical inloader rack): two panels on one side of the spine, one on the other;
       // outer panel of the pair first; any remaining panel may be picked next (anyOf)
-      // 0.4 m toward the trailer's rear: centred, the 4 m panels' front ends reached 0.1 m into the
-      // tractor's collider, and a load that starts inside a collider is shot out when it is hooked on
-      const panels = [-0.45, 0.72, 0.45].map((lz) => { const w = tr.toWorld(-0.4, lz); return J.spawn('precast', w.x, w.z, R, y); });
+      const tr = J.prop('aFrameTrailer', { x: 44.0, z: -25.0, yaw: -R, slots: PANEL_SLOTS_M4, panelX: PANEL_X, panelLen: 4.0 });
+      const y = tr.info.bedY;
+      const panels = PANEL_SLOTS_M4.map((lz) => { const w = tr.toWorld(PANEL_X, lz); return J.spawn('precast', w.x, w.z, R, y); });
       J.prop('precastRack', { x: 50.5, z: -40.0, yaw: 0, slots: [-0.5, 0, 0.5], len: 4.0 });
-      const steps = [];
+      // the 22.7 m start boom reaches 20 m: telescope before rigging, or the first panel has to go back down
+      const steps = [{ kind: 'boom', length: 33.9, text: 'Telescope to 33.9 m (pinned) before rigging — the rack is at R 29 m, out of reach of the 22.7 m boom.' }];
       panels.forEach((p, i) => {
         steps.push({ kind: 'attach', load: p, anyOf: panels, text: `Panel ${i + 1}/3: hook on the next panel on the A-frame (both anchors).` });
         steps.push({ kind: 'deliver', load: p, target: { x: 50.0 + 0.5 * i, y: 0.1, z: -40.0, yaw: R }, tol: 0.25, yawTol: 4, clearY: 4.5, text: `Panel ${i + 1}/3: land it upright in rack slot ${i + 1} (±0.25 m, ±4°). Wind limit 11 m/s.` });
@@ -450,8 +457,8 @@ export const MOBILE_JOBS = [
  */
 export function spawnMobileFreePlay(J, { mobileStart = 'pad' } = {}) {
   J.spawn('testBlock5', 47.5, -8.0, 0, 0);
-  const af = J.prop('aFrameTrailer', { x: 36.5, z: -26.5, yaw: -R });
-  for (const lz of [-0.45, 0.45]) { const w = af.toWorld(0, lz); J.spawn('precast', w.x, w.z, R, af.info.bedY); }
+  const af = J.prop('aFrameTrailer', { x: 36.5, z: -26.5, yaw: -R, slots: PANEL_SLOTS_FREE, panelX: PANEL_X, panelLen: 4.0 });
+  for (const lz of PANEL_SLOTS_FREE) { const w = af.toWorld(PANEL_X, lz); J.spawn('precast', w.x, w.z, R, af.info.bedY); }
   J.prop('lowLoader', { x: 46.0, z: -24.5, yaw: R });
   J.spawn('generator', 46.0, -23.0, R, 0.9);
   if (mobileStart === 'road') {

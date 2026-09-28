@@ -112,6 +112,9 @@
  * @property {boolean} eStop
  * @property {import('../physics/collide.js').Box[]} colliders  owned boxes; the host registers them in
  *   ctx.world and re-syncs after every step (add missing / remove dropped). Mutate boxes in place in step().
+ * @property {import('../physics/collide.js').Box[]} [boomColliders]  mobile: the subset of `colliders` along its
+ *   boom (tag 'mobileBoom'), there for the OTHER machine's hook and load; the machine switches them off while it
+ *   steps itself, and the host skips them when it asks what lies under this machine's own load (jobs.supportBelow)
  * @property {{twoBlockCount:number, lmiTrips:number}} counters  monotonic counters (jobs diff them)
  * @property {number} hoistSpeed            m/s, + = hook up
  * @property {object} levers                lever set actually applied last step (after assists)
@@ -189,6 +192,7 @@
  * @property {boolean} siteTravel            M6 exception: may travel on site with CW mounted
  */
 
+import { Vector3 } from 'three';
 import { MOBILE_STARTS } from '../mobile/config.js';
 
 const ZERO_LEVERS = Object.freeze({ slew: 0, trolley: 0, hoist: 0, tele: 0, luff: 0 });
@@ -229,3 +233,40 @@ export function makeMobileStart(preset = 'pad', over = {}) {
 
 // Degrees shown on the slew readout: clockwise from the reference (same for both machines).
 export const displaySlewDeg = (rad) => (((-rad * (180 / Math.PI)) % 360) + 360) % 360;
+
+// ------------------------------------------------------------------ generic hook-on (host)
+// The riggers can only sling a load while the hook bowl is within the slings' reach: hook →
+// load CoG ≤ load.hangLength, the length the rope system's sling constraint enforces. A hook held
+// higher than that is over the load but cannot be hooked on: attaching there would let the sling
+// constraint snatch the load up by the whole over-reach in one solver step (tonnes of rope force,
+// a launched load, a tipped mobile crane).
+//   horiz / below / high: the search window above the load top (hint "lower the hook")
+//   slack: reach tolerance (m); 2 cm keeps the take-up snatch below ~4 t on the stiffest slings
+export const HOOK_REACH = Object.freeze({ horiz: 1.3, below: 0.3, high: 1.2, slack: 0.02 });
+const _top = new Vector3();
+
+/**
+ * Nearest free load under the hook for the generic hook-on path.
+ * @param {import('../physics/rope.js').HoistSystem} hoist
+ * @param {object[]} loads  shared load list
+ * @returns {{load:object, reach:boolean, over:number}|null}  reach false: over the load but the slings
+ *   do not reach yet (over = metres the hook must still come down); null: nothing under the hook
+ */
+export function findAttachable(hoist, loads) {
+  if (!hoist || hoist.load || hoist.stowed) return null;
+  const h = hoist.hook, R = HOOK_REACH;
+  let best = null, bestScore = Infinity, bestReach = false, bestOver = 0;
+  for (const l of loads) {
+    if (l.attached || l.absorbed) continue;
+    l.topCenter(_top);
+    const horiz = Math.hypot(h.x - _top.x, h.z - _top.z);
+    const dy = h.y - _top.y;
+    if (!(horiz < R.horiz && dy > -R.below && dy < l.def.sling + R.high)) continue;
+    const over = h.distanceTo(l.pos) - l.hangLength;
+    const reach = over <= R.slack;
+    // a load the slings reach beats one they do not; then the closest
+    const score = horiz + Math.abs(dy) * 0.1 + (reach ? 0 : 1000);
+    if (score < bestScore) { best = l; bestScore = score; bestReach = reach; bestOver = Math.max(0, over); }
+  }
+  return best ? { load: best, reach: bestReach, over: bestOver } : null;
+}

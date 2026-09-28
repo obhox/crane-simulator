@@ -291,6 +291,47 @@ export function pane(kit, w, h, c, n, inner = 'glassIn') {
   kit.add(inner, new THREE.PlaneGeometry(w, h), _m.clone(), null, false);
 }
 
+// Convex glass polygon (pts: Vector3[] on the glass plane, either winding; n: outward
+// unit normal) with the same skins and seals as pane() — for raked / chamfered openings.
+export function polyPane(kit, pts, n, inner = 'glassIn') {
+  const u = V(0, 1, 0).cross(n);
+  if (u.lengthSq() < 1e-6) u.set(1, 0, 0);
+  u.normalize();
+  const v = n.clone().cross(u);
+  let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+  for (const p of pts) {
+    const a = p.dot(u), b = p.dot(v);
+    u0 = Math.min(u0, a); u1 = Math.max(u1, a); v0 = Math.min(v0, b); v1 = Math.max(v1, b);
+  }
+  const e1 = V(0, 0, 0), e2 = V(0, 0, 0);
+  const skin = (off, nn) => { // triangle fan, facing nn; UVs 0..1 over the bounding box (dirt map)
+    const pos = [], nor = [], uv = [];
+    for (let i = 1; i < pts.length - 1; i++) {
+      let tri = [pts[0], pts[i], pts[i + 1]];
+      e1.subVectors(tri[1], tri[0]); e2.subVectors(tri[2], tri[0]);
+      if (e1.cross(e2).dot(nn) < 0) tri = [tri[0], tri[2], tri[1]];
+      for (const p of tri) {
+        pos.push(p.x + n.x * off, p.y + n.y * off, p.z + n.z * off);
+        nor.push(nn.x, nn.y, nn.z);
+        uv.push((p.dot(u) - u0) / (u1 - u0 || 1), (p.dot(v) - v0) / (v1 - v0 || 1));
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    return g;
+  };
+  kit.add('glass', skin(0.004, n), null, null, false);
+  for (let i = 0; i < pts.length; i++) { // EPDM seal along every edge (0.026 wide in the plane)
+    const a = pts[i], b = pts[(i + 1) % pts.length];
+    const d = b.clone().sub(a).normalize();
+    kit.member('rubber', a.clone().addScaledVector(d, -0.013).addScaledVector(n, 0.002),
+      b.clone().addScaledVector(d, 0.013).addScaledVector(n, 0.002), { k: 'box', w: 0.026, d: 0.014 }, n.clone().cross(d), 0);
+  }
+  if (inner) kit.add(inner, skin(-0.004, n.clone().negate()), null, null, false);
+}
+
 // Sheave: disc with a rope groove (axis along z, centred) — as the tower's.
 export function sheaveGeo(r, w) {
   const pts = [
@@ -791,34 +832,52 @@ export function buildCraneCab(M, atlas) {
 // Front-left driver cab, built straight into the carrier kit (static), with the
 // steering wheel as its own small group. Carrier coordinates (§1.2: eye at
 // C(6.95, +0.70, 2.85) → three (6.95, 2.85, −0.70)). Its right part lies under
-// the boom in road trim (roof 3.10 < boom underside 3.18 at 0° luff).
-export const DCAB = { x0: 5.95, x1: 7.62, zOut: -AT100.carrier.width / 2, zIn: -0.15, floor: 1.60, roof: 3.10, rake: 0.15 };
+// the boom in road trim, so the roof is chamfered toward the boom as on real AT
+// cabs: high roof (3.30, 0.45 m over the eye: the tall windscreen keeps the roof
+// out of the driver's forward view) outboard of zCh, sloping to 3.10 at the inner
+// wall — ≥ 0.10 m under the base section's round bottom (3.18 on the axis) at 0° luff.
+export const DCAB = { x0: 5.95, x1: 7.62, zOut: -AT100.carrier.width / 2, zIn: -0.15, zCh: -0.50, floor: 1.60, roof: 3.30, roofIn: 3.10, rake: 0.17 };
+const DCAB_BEACON_Z = [DCAB.zOut + 0.12, DCAB.zCh - 0.12]; // rotating beacons on the high roof
 export function addDriverCab(kit, M, atlas, cabGroup) {
-  const { x0, x1, zOut, zIn, floor, roof, rake } = DCAB;
+  const { x0, x1, zOut, zIn, zCh, floor, roof, roofIn, rake } = DCAB;
   const zc = (zOut + zIn) / 2, W = zIn - zOut;
   const yWs = 2.02; // windscreen foot
   const xf = (y) => x1 - rake * Math.max(0, (y - yWs) / (roof - yWs)); // front face x at height y
+  const roofAt = (z) => (z <= zCh ? roof : roof - (roof - roofIn) * (z - zCh) / (zIn - zCh)); // roof line across the cab
   const fr = (a, b, w = 0.06, d = 0.06) => kit.member('cabBody', a, b, { k: 'box', w, d }, null, 0.4);
+  // (z, y) outline of the cab section above the floor → a plate of thickness t along x (x from xa toward −x)
+  const section = (pts, t, xa, key = 'cabBody', bevel = 0) => {
+    const sh = new THREE.Shape(pts.map(([z, y]) => new THREE.Vector2(z, y)));
+    const g = mExtrude(sh, t, bevel ? { bevelEnabled: true, bevelThickness: bevel, bevelSize: bevel, bevelSegments: 2 } : {});
+    g.rotateY(-Math.PI / 2).translate(xa, 0, 0); // shape x → z, extrusion → −x
+    kit.add(key, g, null, WEAR_LIGHT);
+  };
   // --- base below the floor (clear of the front tyre: starts at x 6.35) + wheel-arch panel
   // (the cab's lower body is carrier bodywork, in the carrier colour)
   kit.add('yellow', rbox(x1 - 6.35, floor - 1.08, W, 0.05).translate((x1 + 6.35) / 2, (floor + 1.08) / 2, zc), null, WEAR_LIGHT);
   kit.box('yellow', 6.35 - x0, 0.08, W, (x0 + 6.35) / 2, floor - 0.04, zc, null, WEAR_LIGHT);
-  // --- shell: posts, rails, panels
+  // --- shell: posts, rails (outer and inner side, chamfer ridge), panels
   for (const z of [zOut + 0.03, zIn - 0.03]) {
-    fr(V(x0 + 0.03, floor, z), V(x0 + 0.03, roof, z));
+    const top = roofAt(z);
+    fr(V(x0 + 0.03, floor, z), V(x0 + 0.03, top, z));
     fr(V(x1 - 0.03, floor, z), V(x1 - 0.03, yWs, z));
-    fr(V(x1 - 0.03, yWs, z), V(xf(roof) - 0.03, roof, z));
-    fr(V(x0, roof - 0.03, z), V(xf(roof), roof - 0.03, z), 0.07);
+    fr(V(x1 - 0.03, yWs, z), V(xf(top) - 0.03, top, z));
+    fr(V(x0, top - 0.03, z), V(xf(top), top - 0.03, z), 0.07);
     fr(V(x0, 2.05, z), V(x1, 2.05, z), 0.05); // waist rail
   }
+  fr(V(x0, roof - 0.03, zCh), V(xf(roof), roof - 0.03, zCh), 0.07); // ridge above the chamfer
   fr(V(x1 - 0.03, yWs, zOut), V(x1 - 0.03, yWs, zIn), 0.07);
-  fr(V(xf(roof) - 0.03, roof - 0.03, zOut), V(xf(roof) - 0.03, roof - 0.03, zIn), 0.07);
+  fr(V(xf(roof) - 0.03, roof - 0.03, zOut), V(xf(roof) - 0.03, roof - 0.03, zCh), 0.07); // windscreen header
+  fr(V(xf(roof) - 0.03, roof - 0.03, zCh), V(xf(roofIn) - 0.03, roofIn - 0.03, zIn), 0.07);
   fr(V(6.25, floor, zOut + 0.02), V(6.25, roof, zOut + 0.02), 0.05); // door posts
   fr(V(7.15, floor, zOut + 0.02), V(7.15, roof, zOut + 0.02), 0.05);
-  kit.box('cabBody', 0.03, roof - floor, W, x0 - 0.012, (roof + floor) / 2, zc, null, WEAR_LIGHT); // rear wall
+  section([[zOut, floor], [zIn, floor], [zIn, roofIn], [zCh, roof], [zOut, roof]], 0.03, x0 + 0.003); // rear wall
   for (const z of [zOut - 0.005, zIn + 0.005]) kit.box('cabBody', x1 - x0, 2.05 - floor, 0.02, (x0 + x1) / 2, (floor + 2.05) / 2, z, null, WEAR_LIGHT);
   kit.box('cabBody', 0.02, yWs - floor, W, x1 + 0.005, (yWs + floor) / 2, zc, null, WEAR_LIGHT); // front panel under the screen
-  kit.add('cabBody', rbox(xf(roof) - x0 + 0.1, 0.07, W + 0.06, 0.03).translate((xf(roof) + x0) / 2 + 0.02, roof + 0.03, zc), null, WEAR_LIGHT);
+  // roof skin: flat outboard, bent down along the chamfer (overhangs the windscreen ~0.1 m)
+  const rIn = roofAt(zIn + 0.03);
+  section([[zOut - 0.015, roof - 0.005], [zCh, roof - 0.005], [zIn + 0.015, rIn - 0.005], [zIn + 0.015, rIn + 0.05], [zCh, roof + 0.05], [zOut - 0.015, roof + 0.05]],
+    xf(roofIn) + 0.07 - (x0 - 0.03), xf(roofIn) + 0.07, 'cabBody', 0.015);
   // door handle, outline, steps (under the door, clear of the tyre)
   kit.box('black', 0.006, 1.4, 0.006, 6.27, 1.35 + 0.35, zOut - 0.013);
   kit.box('black', 0.006, 1.4, 0.006, 7.13, 1.35 + 0.35, zOut - 0.013);
@@ -829,15 +888,19 @@ export function addDriverCab(kit, M, atlas, cabGroup) {
   }
   kit.member('galv', V(6.3, 1.2, zOut - 0.06), V(6.3, 2.7, zOut - 0.06), { k: 'tube', r: 0.015, seg: 8 }, null, 0);
   // --- glazing
+  // windscreen (pentagon: its top follows the chamfer) and the side glass, whose
+  // front edges follow the raked A-pillars
   const nF = V(roof - yWs, rake, 0).normalize();
-  const hWs = Math.hypot(roof - yWs - 0.1, rake);
-  pane(kit, W - 0.12, hWs, V((x1 + xf(roof)) / 2, (yWs + roof) / 2, zc), nF, 'glassIn');
-  pane(kit, 0.84, roof - 2.1 - 0.06, V(6.70, (2.1 + roof) / 2 - 0.03, zOut), V(0, 0, -1)); // door window
-  pane(kit, x1 - 7.2 - 0.05, roof - 2.1 - 0.06, V((7.2 + x1) / 2 - 0.05, (2.1 + roof) / 2 - 0.03, zOut), V(0, 0, -1));
-  pane(kit, x1 - x0 - 0.2, roof - 2.1 - 0.06, V((x0 + x1) / 2, (2.1 + roof) / 2 - 0.03, zIn), V(0, 0, 1));
+  const ws = (y, z) => V(xf(y), y, z);
+  const yTop = (z) => roofAt(z) - 0.065;
+  polyPane(kit, [ws(yWs + 0.05, zOut + 0.06), ws(yWs + 0.05, zIn - 0.06), ws(yTop(zIn - 0.06), zIn - 0.06), ws(yTop(zCh), zCh), ws(yTop(zOut), zOut + 0.06)], nF, 'glassIn');
+  pane(kit, 0.84, roof - 2.1 - 0.065, V(6.70, (2.1 + roof) / 2 - 0.0325, zOut), V(0, 0, -1)); // door window
+  const side = (z, xb, top) => [V(xb, 2.1, z), V(xf(2.1) - 0.065, 2.1, z), V(xf(top) - 0.065, top, z), V(xb, top, z)];
+  polyPane(kit, side(zOut, 7.2, yTop(zOut)), V(0, 0, -1));
+  polyPane(kit, side(zIn, x0 + 0.1, yTop(zIn)), V(0, 0, 1));
   pane(kit, 0.5, 0.45, V(x0 - 0.03, 2.65, zc), V(-1, 0, 0));
-  // --- exterior: visor, wipers, mirrors, beacons bases, horns, lamps
-  kit.box('black', 0.3, 0.02, W + 0.04, xf(roof) + 0.12, roof - 0.02, zc, [0, 0, -0.12]);
+  // --- exterior: wipers, mirrors, beacons bases, horns, lamps (no external visor: the
+  // roof overhang shades the screen and nothing hangs into the driver's view)
   // wipers parked along the windscreen foot (out of the driver's sight line)
   for (const z of [zOut + 0.12, zc + 0.05]) {
     const p0 = V(x1 + 0.014, yWs + 0.05, z), p1 = V(xf(yWs + 0.08) + 0.014, yWs + 0.08, z + 0.5);
@@ -850,14 +913,19 @@ export function addDriverCab(kit, M, atlas, cabGroup) {
   kit.member('black', V(7.5, 1.95, 1.3), V(7.5, 2.55, 1.42), { k: 'tube', r: 0.02, seg: 8 }, null, 0);
   kit.add('black', rbox(0.1, 0.38, 0.2, 0.03).translate(7.55, 2.62, 1.42), null, null, false);
   kit.detail = true;
-  for (const z of [zOut + 0.12, zIn - 0.12]) kit.cyl('black', 0.07, 0.04, x0 + 0.15, roof + 0.085, z, 'y', 14); // beacon bases
-  kit.cyl('galv', 0.035, 0.38, x0 + 0.5, roof + 0.1, zc, 'x', 10); // air horn
-  kit.cyl('black', 0.006, 0.5, x0 + 0.9, roof + 0.3, zIn - 0.1, 'y', 6); // antenna
+  // roof items all on the high roof, outboard of the boom (its side is at |z| 0.45)
+  for (const z of DCAB_BEACON_Z) kit.cyl('black', 0.07, 0.04, x0 + 0.15, roof + 0.085, z, 'y', 14); // beacon bases
+  kit.cyl('galv', 0.035, 0.38, x0 + 0.5, roof + 0.1, zc - 0.1, 'x', 10); // air horn
+  kit.cyl('black', 0.006, 0.5, x0 + 0.9, roof + 0.3, zOut + 0.1, 'y', 6); // antenna
   lamp(kit, 'amber', 0.07, 0.07, V(x1 + 0.012, 1.95, zOut + 0.06), V(1, 0, -0.4), true);
   // --- interior
   kit.box('black', 0.34, 0.3, W - 0.1, x1 - 0.2, 1.97, zc); // dashboard
   decal(kit, atlas, 'dash', 0.52, 0.2, V(x1 - 0.37, 2.16, -0.70), V(-1, 0.55, 0));
-  kit.box('panel', x1 - x0 - 0.1, 0.02, W - 0.1, (x0 + x1) / 2, roof - 0.07, zc);
+  // headliner: flat outboard, sloped under the chamfer; ends behind the windscreen header
+  kit.box('panel', xf(roof) - x0 - 0.1, 0.02, zCh - zOut - 0.06, (x0 + xf(roof)) / 2, roof - 0.07, (zOut + zCh) / 2);
+  const chW = Math.hypot(zIn - zCh, roof - roofIn), chD = V(0, roofIn - roof, zIn - zCh).normalize();
+  kit.member('panel', V(x0 + 0.05, (roof + roofIn) / 2 - 0.08, (zCh + zIn) / 2), V(xf(roofIn) - 0.05, (roof + roofIn) / 2 - 0.08, (zCh + zIn) / 2),
+    { k: 'box', w: chW - 0.02, d: 0.02 }, chD, 0);
   kit.box('rubber', x1 - x0 - 0.1, 0.012, W - 0.1, (x0 + x1) / 2, floor + 0.006, zc);
   const sx = 6.78, sz = -0.70; // seat under the spec eye (6.95, 2.85): eye ~0.3 m ahead of the backrest
   kit.cyl('darkSteel', 0.05, 0.3, sx + 0.1, floor + 0.15, sz, 'y', 12);
@@ -888,7 +956,7 @@ export function addDriverCab(kit, M, atlas, cabGroup) {
   eye.name = 'driverEye';
   eye.position.set(AT100.driverCab.x, AT100.driverCab.z, -AT100.driverCab.y);
   cabGroup.add(eye);
-  const beacons = [zOut + 0.12, zIn - 0.12].map((z) => {
+  const beacons = DCAB_BEACON_Z.map((z) => {
     const b = new THREE.Object3D();
     b.position.set(x0 + 0.15, roof + 0.105, z);
     cabGroup.add(b);

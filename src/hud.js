@@ -2,6 +2,7 @@ import { CRANE, CHART_POINTS, ratedCapacity, SAFETY } from './config.js';
 import { JOBS, fmtTime, bestScore } from './jobs.js';
 import { MobileHud } from './hudMobile.js';
 import { MOBILE_SETTINGS } from './mobile/config.js';
+import { currentInput } from './input.js';
 
 // Heads-up display: in-cab LMI touchscreen, job card, toasts, signaller
 // subtitles, context hints and all menu screens. Pure DOM, no framework.
@@ -145,6 +146,7 @@ export class Hud {
       <span class="tb-label">CAM</span><span class="tb-cam-name">—</span>
     </button>
     <div class="tb-timer" hidden><span class="tb-label">JOB</span><span class="tb-time">0:00</span></div>
+    <div class="tb-timer tb-warp" hidden data-s="on" role="status"><span class="tb-warp-x">×4</span><span class="tb-warp-t"></span></div>
     <button class="tb-btn tb-pause" type="button" title="Pause (Esc)" aria-label="Pause">
       <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><rect x="2" y="1.5" width="3" height="9" rx="0.6"/><rect x="7" y="1.5" width="3" height="9" rx="0.6"/></svg>
     </button>
@@ -249,7 +251,7 @@ export class Hud {
     const q = (s) => this.root.querySelector(s);
     this.el = {
       game: q('.hud-game'),
-      camBtn: q('.tb-cam'), camName: q('.tb-cam-name'), timer: q('.tb-timer'), time: q('.tb-time'), pauseBtn: q('.tb-pause'),
+      camBtn: q('.tb-cam'), camName: q('.tb-cam-name'), timer: q('.tb-timer'), time: q('.tb-time'), warp: q('.tb-warp'), warpT: q('.tb-warp-t'), pauseBtn: q('.tb-pause'),
       job: q('.jobcard'), jcModule: q('.jc-module'), jcPar: q('.jc-par'), jcToggle: q('.jc-toggle'), jcTitle: q('.jc-title'),
       jcBrief: q('.jc-brief'), jcBlind: q('.jc-blind'), jcStep: q('.jc-step'), jcStepLabel: q('.jc-steplabel'),
       jcStepText: q('.jc-steptext'), jcProgress: q('.jc-progress'), jcProgressFill: q('.jc-progress i'),
@@ -577,11 +579,11 @@ export class Hud {
     ${range('windDir', 'Wind direction', 0, 359, 1)}
   </fieldset>
   <fieldset class="set-group">
-    <legend>Crane</legend>
+    <legend>Tower crane TC-6010</legend>
     ${select('falls', 'Reeving', [['2', '2 falls (4 t)'], ['4', '4 falls (8 t)']])}
     ${select('slewMode', 'Slewing mode', [['0', 'SOFT'], ['1', 'NORMAL'], ['2', 'DYNAMIC']])}
     ${check('swayAssist', 'Sway Control assist')}
-    ${check('zoneLimiter', 'Working-area limiter (road)')}
+    ${check('zoneLimiter', 'Working-area limiter over the road (both cranes)')}
   </fieldset>
   <fieldset class="set-group">
     <legend>Mobile crane AT-100</legend>
@@ -728,6 +730,13 @@ export class Hud {
 </div>
 <div class="help-cols help-pane" data-help="mobile" hidden>
   <section>
+    <h3>Every mode</h3>
+    <table class="keys">
+      ${row(k('C'), 'Change camera (the chip at the top shows which one)')}
+      ${row('Mouse', 'Drag to look around, wheel to zoom')}
+      ${row(`${k('H')} / ${k('V')}`, 'Horn / signaller guidance on-off')}
+      ${row(`${k('Esc')} / ${k('Tab')}`, 'Pause / switch machine (free play)')}
+    </table>
     <h3>Crane cab (ISO 7752-2 cross-shift)</h3>
     <table class="keys">
       ${row(`${k('A')} ${k('D')}`, 'Slew left / right (left lever ↔)')}
@@ -739,10 +748,11 @@ export class Hud {
       ${row(k('L'), 'RCL configuration (enter the actual set-up)')}
       ${row(k('O'), 'Reeving / hook block (block landed, no load)')}
       ${row(`${k('T')} / ${k('F')}`, 'Turntable pin / free slew')}
-      ${row(`${k('R')} / ${k('H')}`, 'Hook on / release (also releases the stowed block) / horn')}
+      ${row(k('R'), 'Hook on / release (also releases the stowed block)')}
       ${row(`${k('M')} / ${k('Q')} ${k('E')}`, 'Mute RCL horn / tag line')}
-      ${row(`${k('Enter')} / ${k('Z')}`, 'Outrigger remote (SETUP) / hold for ×4 time')}
-      ${row(`${k('Space')} / ${k('Tab')}`, 'Emergency stop / switch machine (free play)')}
+      ${row(`${k('Enter')} / ${k('Space')}`, 'Outrigger remote (SETUP) / emergency stop')}
+      ${row(k('Z'), 'Hold for ×4 time (not with a suspended load)')}
+      ${row(`${k('Ctrl')} ${k('Shift')} ${k('B')}`, 'RCL emergency bypass — only if allowed in Settings; fails the job')}
     </table>
     <h3>Gamepad (crane)</h3>
     <table class="keys">
@@ -769,6 +779,7 @@ export class Hud {
       ${row(`${k('W')} ${k('S')}`, 'Jack down (extend) / up')}
       ${row(`${k('X')} / ${k('G')}`, 'Mat / hold to auto-level')}
       ${row(`${k('B')} / ${k('T')}`, 'Hold: ballast raise-lower (pinned) / turntable pin')}
+      ${row(`${k('Space')} / ${k('Z')}`, 'Remote stop (halts every outrigger motion) / hold for ×4 time')}
       ${row(`${k('Enter')} / ${k('⌫')}`, 'Crane cab / back to ROAD (travel interlock)')}
     </table>
     <h3>Operating tips</h3>
@@ -845,29 +856,38 @@ export class Hud {
   }
 
   // checklist: [{label, ok, value?}] — the mobile setup checklist (§8.5), shown as its own block;
-  // critical: reason text of a critical failure (overturned, punch-through, …) → grade F badge
-  showResults({ job, items = [], score = 0, grade = 'F', best = null, assisted = false, checklist = null, critical = null } = {}) {
+  // failed (alias critical): reason text of a critical failure (overturned, punch-through, traffic
+  // collision, …) → 'Job failed' kicker + CRITICAL badge; criticalRisk: the RCL config entered was
+  // unconservative (job still completed, but flagged).
+  showResults({ job, items = [], score = 0, grade = 'F', best = null, assisted = false, checklist = null, critical = null, failed = null, criticalRisk = false } = {}) {
     const s = this.screens.results;
-    const newBest = best === null || best === undefined || score > best;
+    const fail = failed || critical || null;
+    const failTxt = fail === true ? 'job failed' : fail;
+    const newBest = !fail && (best === null || best === undefined || score > best);
     const bestTxt = best === null || best === undefined ? 'First attempt' : `Previous best ${Math.round(best)}`;
-    const rows = items.map((it) => {
+    // critical rows (failure reason, traffic collision, bypass, unconservative config) lead the table
+    const isCrit = (it) => /^CRITICAL/i.test(String(it.label || '')) || /CRITICAL/.test(String(it.note || ''));
+    const ordered = [...items.filter(isCrit), ...items.filter((it) => !isCrit(it))];
+    const rows = ordered.map((it) => {
       const pts = Number(it.pts) || 0;
-      const cls = pts < 0 ? 'neg' : pts > 0 ? 'pos' : 'zero';
+      const cls = (pts < 0 ? 'neg' : pts > 0 ? 'pos' : 'zero') + (isCrit(it) ? ' crit' : '');
       const ptsTxt = pts === 0 ? '0' : pts > 0 ? `+${pts}` : `−${Math.abs(pts)}`;
       return `<tr class="${cls}"><th>${esc(it.label)}${it.note ? ` <em>${esc(it.note)}</em>` : ''}</th><td class="r-val">${esc(it.value)}</td><td class="r-pts">${ptsTxt}</td></tr>`;
     }).join('');
     const idx = job ? (this._jobs || JOBS).findIndex((j) => j.id === job.id) : -1;
+    s.classList.toggle('failed', !!fail);
     s.innerHTML = `
 <header class="res-head">
   <div class="res-grade g-${esc(String(grade).toLowerCase())}" aria-label="Grade ${esc(grade)}">${esc(grade)}</div>
   <div class="res-sum">
-    <div class="sh-kicker">Job complete${job && job.module ? ` · ${esc(job.module)}` : ''}</div>
+    <div class="sh-kicker${fail ? ' bad' : ''}">${fail ? 'Job failed' : 'Job complete'}${job && job.module ? ` · ${esc(job.module)}` : ''}</div>
     <h2>${esc(job ? job.title : 'Lift job')}</h2>
     <div class="res-score"><b>${Math.round(score)}</b><span>/100</span></div>
     <div class="res-badges">
-      <span class="badge ${newBest && best !== null && best !== undefined ? 'good' : ''}">${newBest && best !== null && best !== undefined ? `New best · was ${Math.round(best)}` : esc(bestTxt)}</span>
+      ${fail ? `<span class="badge bad">CRITICAL · ${esc(failTxt)}</span>` : ''}
+      ${criticalRisk ? '<span class="badge bad">CRITICAL RISK · RCL config unconservative</span>' : ''}
+      <span class="badge ${newBest && best !== null && best !== undefined ? 'good' : ''}">${fail ? `${esc(bestTxt)} · not recorded` : newBest && best !== null && best !== undefined ? `New best · was ${Math.round(best)}` : esc(bestTxt)}</span>
       ${assisted ? '<span class="badge warn">Sway Control assisted</span>' : ''}
-      ${critical ? `<span class="badge bad">CRITICAL · ${esc(critical)}</span>` : ''}
     </div>
   </div>
 </header>
@@ -1054,6 +1074,7 @@ ${Array.isArray(checklist) && checklist.length ? `
     setText(E.camName, s.cameraName || '—');
     setHidden(E.timer, !s.job);
     if (s.job) setText(E.time, fmtTime(s.jobTime || 0));
+    this._updateWarp(s);
 
     if ((mobile ? 'mobile' : 'tower') !== this._machine) this.setMachine(mobile ? 'mobile' : 'tower');
     if (mobile) {
@@ -1162,6 +1183,29 @@ ${Array.isArray(checklist) && checklist.length ? `
 
     // load chart
     this._drawChart(s.falls || 4, s.radius || 0, payload, lmiState);
+  }
+
+  // hold-Z ×4 time (mobile, §3.4): badge while it runs, a refusal while a load hangs on the hook.
+  // s.timeWarp {active, reason} from the host wins; otherwise it is derived like canTimeWarp().
+  _updateWarp(s) {
+    const inp = currentInput();
+    const live = this.cb.getSettings ? this.cb.getSettings() : null;
+    const enabled = (live && typeof live.timeWarp === 'boolean' ? live.timeWarp : this._settings.timeWarp) !== false;
+    const held = s.machine === 'mobile' && enabled && !!(inp && inp.timeWarp);
+    let st = '', txt = '';
+    if (held) {
+      const tw = s.timeWarp && typeof s.timeWarp === 'object' ? s.timeWarp : null;
+      const mode = s.mobile && s.mobile.mode;
+      const suspended = !!s.loadName && !s.grounded;
+      const ok = tw ? !!tw.active : !suspended && mode !== 'TIPPING' && mode !== 'OVERTURNED';
+      st = ok ? 'on' : 'no';
+      txt = ok ? 'TIME' : tw && tw.reason ? String(tw.reason).toUpperCase() : suspended ? 'NOT WITH A SUSPENDED LOAD' : 'NOT NOW';
+    }
+    setHidden(this.el.warp, !st);
+    if (st) {
+      setData(this.el.warp, 's', st);
+      setText(this.el.warpT, txt);
+    }
   }
 
   _updateHints(s) {

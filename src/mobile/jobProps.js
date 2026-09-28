@@ -185,27 +185,71 @@ function wheel(B, M, x, y, z, r, w, dual = false) {
   B.add(M.steel, nut, trs(x, y, z), CHROME);
 }
 
-// cab-over truck cab: rear at x0, front at x0 + L, floor at y0 (local frame)
+// side profile (x, y pairs) extruded across z by `depth` with bevelled edges
+// (rounded front corners, roof and bottom edges), centred on z = 0
+function bevelPrism(pts, depth, bev) {
+  const sh = new THREE.Shape(pts.map(([x, y]) => new THREE.Vector2(x, y)));
+  const g = new THREE.ExtrudeGeometry(sh, { depth: depth - 2 * bev, bevelEnabled: true, bevelThickness: bev, bevelSize: bev, bevelOffset: -bev, bevelSegments: 2, curveSegments: 4 });
+  g.translate(0, 0, -(depth - 2 * bev) / 2);
+  return g;
+}
+
+// cab-over truck cab: rear at x0, front at x0 + L, floor at y0 (local frame).
+// Bevelled shell; two-pane windscreen in a rubber surround with black A-pillar
+// trim, parked wipers and a sun visor; door shut lines, grab handle, side
+// windows in rubber; main + wide-angle mirror heads on tubular arms; grille,
+// bumper, lamps and steps.
 function cab(B, M, x0, y0, L, H, W, color, high = false) {
+  const RUB = col(0x141618), TRIM = col(0x24272a);
   const prof = [[0, 0], [L, 0], [L, H * 0.46], [L - 0.1, H * 0.88], [L - 0.28, H], [0, H]];
-  B.add(M.paintVeh, prism(prof.map(([px, py]) => [x0 + px, y0 + py]), W), null, color);
+  B.add(M.paintVeh, bevelPrism(prof.map(([px, py]) => [x0 + px, y0 + py]), W, 0.06), null, color);
+  // windscreen frame on the raked face (local x = across, y = up the rake, z = outward)
   const wsH = H * 0.4, wsY = y0 + H * 0.67, rake = Math.atan2(0.1, H * 0.42);
-  B.add(M.glass, plane(W - 0.2, wsH), trs(x0 + L - 0.045, wsY, 0, Math.PI / 2, 0, 0).multiply(trs(0, 0, 0, 0, -rake)));
+  const wsM = trs(x0 + L - 0.05, wsY, 0, Math.PI / 2, 0, 0).multiply(trs(0, 0, 0, 0, -rake));
+  const ws = (dx, dy, dz, rz = 0) => wsM.clone().multiply(trs(dx, dy, dz, 0, 0, rz));
+  B.add(M.rubber, plane(W - 0.14, wsH + 0.04), ws(0, 0, 0.006), RUB);
+  const paneW = (W - 0.3) / 2;
   for (const s of [-1, 1]) {
-    B.add(M.glass, plane(0.85, H * 0.34), trs(x0 + L - 0.62, y0 + H * 0.68, s * (W / 2 + 0.005), s > 0 ? 0 : Math.PI));
-    B.add(M.paintVeh, box(0.02, H * 0.8, 0.01), trs(x0 + L - 1.15, y0 + H * 0.45, s * (W / 2 + 0.006)), DARK);
-    B.add(M.steel, box(0.16, 0.03, 0.03), trs(x0 + L - 1.05, y0 + H * 0.5, s * (W / 2 + 0.02)), CHROME);
+    const c = s * (paneW / 2 + 0.03);
+    B.add(M.glass, plane(paneW, wsH - 0.03), ws(c, 0, 0.012));
+    B.add(M.paint, box(0.07, wsH + 0.05, 0.014), ws(s * (W / 2 - 0.1), 0, 0.008), TRIM); // A-pillar trim
+    B.add(M.paint, box(paneW - 0.3, 0.022, 0.016), ws(c + 0.04, -wsH / 2 + 0.075, 0.024, 0.05), TRIM); // wiper blade
+    B.add(M.paint, box(0.3, 0.018, 0.014), ws(c - paneW / 2 + 0.24, -wsH / 2 + 0.055, 0.022, 0.12), TRIM); // wiper arm
+    B.add(M.paint, box(0.05, 0.05, 0.03), ws(c - paneW / 2 + 0.1, -wsH / 2 + 0.035, 0.018), TRIM); // spindle
+  }
+  B.add(M.paint, box(0.36, 0.035, W - 0.16), trs(x0 + L - 0.18, y0 + H * 0.9 + 0.03, 0, 0, 0, -0.12), TRIM); // sun visor
+  for (const s of [-1, 1]) {
+    const zs = s * (W / 2 + 0.004), zo = s * (W / 2);
+    // side window in its rubber
+    B.add(M.rubber, box(0.95, H * 0.34 + 0.08, 0.006), trs(x0 + L - 0.62, y0 + H * 0.68, zs), RUB);
+    B.add(M.glass, plane(0.85, H * 0.34), trs(x0 + L - 0.62, y0 + H * 0.68, s * (W / 2 + 0.009), s > 0 ? 0 : Math.PI));
+    // door shut lines (rear, front, top, bottom) and handles
+    B.add(M.paint, box(0.014, H * 0.86, 0.006), trs(x0 + L - 1.15, y0 + H * 0.45, zs), TRIM);
+    B.add(M.paint, box(0.014, H * 0.46, 0.006), trs(x0 + L - 0.17, y0 + H * 0.25, zs), TRIM);
+    B.add(M.paint, box(0.98, 0.014, 0.006), trs(x0 + L - 0.66, y0 + H * 0.88, zs), TRIM);
+    B.add(M.paint, box(0.98, 0.014, 0.006), trs(x0 + L - 0.66, y0 + 0.03, zs), TRIM);
+    B.add(M.steel, box(0.16, 0.03, 0.03), trs(x0 + L - 1.02, y0 + H * 0.5, s * (W / 2 + 0.02)), CHROME);
+    B.add(M.steel, box(0.03, 0.6, 0.03), trs(x0 + L - 1.25, y0 + H * 0.36, s * (W / 2 + 0.035)), CHROME); // grab handle
+    B.add(M.plastic, box(0.1, 0.045, 0.01), trs(x0 + L - 0.32, y0 + 0.12, s * (W / 2 + 0.005)), LAMP_A); // side marker
+    // steps under the door
     for (const sy of [-0.45, -0.1]) B.add(M.paint, box(0.45, 0.05, 0.25), trs(x0 + L - 0.65, y0 + sy, s * (W / 2 - 0.08)), DARK);
-    B.add(M.paint, box(0.05, 0.05, 0.35), trs(x0 + L - 0.2, y0 + H * 0.78, s * (W / 2 + 0.17)), DARK);
-    B.add(M.paint, box(0.08, 0.42, 0.22), trs(x0 + L - 0.15, y0 + H * 0.7, s * (W / 2 + 0.36)), DARK);
+    // mirrors: two tubular arms from the A-pillar, a vertical tube, main + wide-angle heads
+    const xm = x0 + L - 0.14, zt = W / 2 + 0.22;
+    for (const yy of [H * 0.5, H * 0.86]) B.add(M.steel, box(0.035, 0.035, 0.24), trs(xm + 0.04, y0 + yy, s * (W / 2 + 0.11)), TRIM);
+    B.add(M.steel, box(0.035, H * 0.38, 0.035), trs(xm + 0.04, y0 + H * 0.68, s * zt), TRIM);
+    B.add(M.paint, box(0.1, 0.45, 0.25), trs(xm, y0 + H * 0.74, s * (zt + 0.08)), DARK);
+    B.add(M.glass, plane(0.21, 0.41), trs(xm - 0.051, y0 + H * 0.74, s * (zt + 0.08), -Math.PI / 2));
+    B.add(M.paint, box(0.09, 0.2, 0.2), trs(xm, y0 + H * 0.74 - 0.36, s * (zt + 0.08)), DARK);
+    B.add(M.glass, plane(0.17, 0.17), trs(xm - 0.046, y0 + H * 0.74 - 0.36, s * (zt + 0.08), -Math.PI / 2));
+    // headlamp in a dark bezel, indicator
+    B.add(M.paint, box(0.03, 0.2, 0.52), trs(x0 + L + 0.005, y0 + 0.28, s * (W / 2 - 0.26)), TRIM);
     B.add(M.plastic, box(0.04, 0.14, 0.3), trs(x0 + L + 0.02, y0 + 0.28, s * (W / 2 - 0.35)), LAMP_W);
     B.add(M.plastic, box(0.04, 0.08, 0.12), trs(x0 + L + 0.02, y0 + 0.28, s * (W / 2 - 0.12)), LAMP_A);
   }
   B.add(M.paint, box(0.03, H * 0.3, W * 0.62), trs(x0 + L + 0.01, y0 + H * 0.28, 0), DARK);
   for (let i = 0; i < 5; i++) B.add(M.paint, box(0.02, 0.02, W * 0.6), trs(x0 + L + 0.03, y0 + H * 0.16 + i * 0.07, 0), col(0x55595e));
   B.add(M.paint, box(0.22, 0.32, W + 0.05), trs(x0 + L + 0.05, y0 - 0.05, 0), col(0x46494d));
-  B.add(M.paintVeh, box(0.3, 0.05, W - 0.1), trs(x0 + L - 0.02, y0 + H + 0.01, 0, 0, 0, -0.2), color);
-  if (high) B.add(M.paintVeh, prism([[0, 0], [1.3, 0], [1.3, 0.1], [0.2, 0.55], [0, 0.55]].map(([px, py]) => [x0 + 0.25 + px, y0 + H + py]), W - 0.3), null, color);
+  if (high) B.add(M.paintVeh, bevelPrism([[0, 0], [1.3, 0], [1.3, 0.1], [0.2, 0.55], [0, 0.55]].map(([px, py]) => [x0 + 0.25 + px, y0 + H - 0.02 + py]), W - 0.3, 0.04), null, color);
   B.add(M.plastic, cyl(0.08, 0.1, 0.14, 10), trs(x0 + 0.5, y0 + H + (high ? 0.6 : 0.07), 0), LAMP_A);
 }
 
@@ -299,7 +343,7 @@ function tractor(B, M, ox, color) {
 // Semi-trailer + tractor. Local origin = trailer centre. kinds:
 //   flat (13.6 m, deck 1.45), lowloader (gooseneck + deck 0.9 on small
 //   pendle wheels), aframe (low deck 1.0 with a central A-frame rack)
-function semi(P, M, { kind = 'flat', color = col(0x1f4f8f) } = {}) {
+function semi(P, M, { kind = 'flat', color = col(0x1f4f8f), slots = null, panelX = 0, panelLen = 4.0 } = {}) {
   const B = new MeshBatch();
   const Lt = kind === 'flat' ? 13.6 : kind === 'lowloader' ? 13.0 : 10.0;
   const front = Lt / 2, rear = -Lt / 2;
@@ -326,20 +370,54 @@ function semi(P, M, { kind = 'flat', color = col(0x1f4f8f) } = {}) {
       for (const x of [rear + 0.9, rear + 1.9, rear + 2.9]) wheel(B, M, x, 0.37, s * 0.95, 0.37, 0.24, true);
     }
     rearLights(B, M, rear + 0.05, 0.55);
-  } else { // aframe
+  } else { // aframe: low deck with a vertical (inloader-style) panel rack
     deckY = 1.0; deck0 = rear; deck1 = front - 0.4;
     platform(B, M, deck0, deck1, deckY);
     B.add(M.paint, box(1.4, 0.4, 2.4), trs(front - 0.7, 1.35, 0), DARK); // gooseneck
     for (const s of [-1, 1]) for (const x of [rear + 1.2, rear + 2.4]) wheel(B, M, x, 0.45, s * 0.95, 0.45, 0.28, true);
-    // A-frame: inclined posts both sides of the spine, top rail, stays
-    const aH = 2.3, lean = 0.28;
-    for (let x = rear + 0.8; x <= deck1 - 0.4; x += 2.0) {
-      for (const s of [-1, 1]) B.add(M.paint, box(0.1, Math.hypot(aH, lean), 0.1), trs(x, deckY + aH / 2, s * lean / 2, 0, -s * Math.atan2(lean, aH), 0), col(0x2f6db3));
+    // Central spine: two rows of vertical posts at z ±0.30 (faces 0.26…0.34) that the
+    // upright 0.2 m panels (inner faces at |z| 0.35) stand against, top / foot rails,
+    // cross ties and X-bracing set back inside the post rows.
+    const aH = 2.3, pz = 0.30, RACK = col(0x2f6db3);
+    const x0 = rear + 0.8, x1 = deck1 - 0.4, xs = [];
+    for (let x = x0; x <= x1 + 1e-6; x += 2.0) xs.push(x);
+    for (const x of xs) {
+      for (const s of [-1, 1]) B.add(M.paint, box(0.1, aH, 0.08), trs(x, deckY + aH / 2, s * pz), RACK);
+      B.add(M.paint, box(0.08, 0.1, 2 * pz - 0.08), trs(x, deckY + aH - 0.05, 0), RACK); // top cross tie
+      B.add(M.paint, box(0.08, 0.1, 2 * pz - 0.08), trs(x, deckY + 0.95, 0), RACK); // mid cross tie
     }
-    B.add(M.paint, box(deck1 - rear - 1.2, 0.12, 0.12), trs((rear + 0.8 + deck1 - 0.4) / 2, deckY + aH, 0), col(0x2f6db3));
-    for (const s of [-1, 1]) B.add(M.paint, box(deck1 - rear - 1.2, 0.1, 0.1), trs((rear + 0.8 + deck1 - 0.4) / 2, deckY + 0.08, s * 0.3), col(0x2f6db3)); // kick rails at the spine foot
+    for (const s of [-1, 1]) {
+      B.add(M.paint, box(x1 - x0 + 0.1, 0.12, 0.08), trs((x0 + x1) / 2, deckY + aH - 0.06, s * pz), RACK); // top rail
+      B.add(M.paint, box(x1 - x0 + 0.1, 0.1, 0.08), trs((x0 + x1) / 2, deckY + 0.08, s * pz), RACK); // foot rail
+      for (let i = 0; i + 1 < xs.length; i++) {
+        const dx = xs[i + 1] - xs[i], dh = aH - 0.3, len = Math.hypot(dx, dh), ang = Math.atan2(dh, dx);
+        for (const d of [1, -1]) B.add(M.paint, box(len, 0.05, 0.03), trs((xs[i] + xs[i + 1]) / 2, deckY + 0.15 + dh / 2, s * (pz - 0.03), 0, 0, d * ang), RACK);
+      }
+    }
+    // Outer restraint posts in deck sockets, one pair per side just inside the panel ends,
+    // against the outermost panel on that side, with a screw clamp pad on the panel face
+    // and a kicker brace out to the deck edge. Visual only: the panels lift straight out.
+    const sl = slots && slots.length ? slots : [-0.45, 0.45];
+    const pX = slots && slots.length ? panelX : 0, halfL = panelLen / 2;
+    for (const s of [-1, 1]) {
+      const side = sl.filter((z) => Math.sign(z) === s).map(Math.abs);
+      if (!side.length) continue;
+      const face = Math.max(...side) + 0.1; // outer face of the outermost panel
+      const zo = face + 0.01 + 0.035, hP = 1.85;
+      const dz = 1.18 - zo, dy = 0.85, bl = Math.hypot(dz, dy);
+      for (const x of [pX - halfL + 0.45, pX + halfL - 0.45]) {
+        B.add(M.paint, box(0.07, hP, 0.07), trs(x, deckY + hP / 2, s * zo), RACK);
+        B.add(M.paint, box(0.16, 0.06, 0.16), trs(x, deckY + 0.03, s * zo), DARK); // deck socket
+        if (dz > 0.05) B.add(M.paint, box(0.05, bl, 0.05), trs(x, deckY + 0.05 + dy / 2, s * (zo + dz / 2), 0, -s * Math.atan2(dz, dy), 0), RACK);
+        for (const y of [0.55, 1.55]) {
+          B.add(M.rubber, box(0.14, 0.14, 0.012), trs(x, deckY + y, s * (face + 0.006)), col(0x1a1a1a)); // clamp pad
+          B.add(M.steel, box(0.03, 0.03, 0.09), trs(x, deckY + y, s * (zo + 0.02)), col(0x9a9ea2)); // screw
+          B.add(M.steel, box(0.03, 0.16, 0.03), trs(x, deckY + y, s * (zo + 0.06)), col(0x9a9ea2)); // tommy bar
+        }
+      }
+    }
     rearLights(B, M, rear + 0.05, 0.6);
-    P.info.aFrame = { lean, aH };
+    P.info.aFrame = { lean: 0, aH, postZ: pz };
   }
   B.build(P.root);
   // colliders: tractor cab + chassis, trailer deck (+ gooseneck / A-frame spine)
@@ -347,7 +425,8 @@ function semi(P, M, { kind = 'flat', color = col(0x1f4f8f) } = {}) {
   P.box(tx - 0.9, 0.65, 0, 2.2, 0.65, 1.25);
   P.box((deck0 + deck1) / 2, (deckY + 0.3) / 2, 0, (deck1 - deck0) / 2, (deckY - 0.3) / 2, 1.25);
   if (kind === 'lowloader') P.box(front - 1.5, 1.3, 0, 1.5, 0.35, 1.25);
-  if (kind === 'aframe') P.box((rear + 0.8 + deck1 - 0.4) / 2, 1.0 + 1.15, 0, (deck1 - rear - 1.2) / 2, 1.15, 0.12, 0, 'rack');
+  // rack spine (visual posts reach |z| 0.34; panels stand at |z| ≥ 0.35): 0.15 m clear of the panels
+  if (kind === 'aframe') P.box((rear + 0.8 + deck1 - 0.4) / 2, 1.0 + 1.15, 0, (deck1 - rear - 1.2) / 2, 1.15, 0.2, 0, 'rack');
   P.info.bedY = deckY;
   P.info.bed = [deck0, deck1];
 }
@@ -493,7 +572,9 @@ const BUILDERS = {
   },
   semiFlat(P, o, J, M) { semi(P, M, { kind: 'flat', color: col(o.color ?? 0x1f4f8f) }); },
   lowLoader(P, o, J, M) { semi(P, M, { kind: 'lowloader', color: col(o.color ?? 0xb3261e) }); },
-  aFrameTrailer(P, o, J, M) { semi(P, M, { kind: 'aframe', color: col(o.color ?? 0x2d6a3e) }); },
+  // opts.slots: lateral (local z) centres of the panels it carries, panelX / panelLen their
+  // local x centre and length, so the rack's restraint posts and clamps sit against them
+  aFrameTrailer(P, o, J, M) { semi(P, M, { kind: 'aframe', color: col(o.color ?? 0x2d6a3e), slots: o.slots, panelX: o.panelX, panelLen: o.panelLen }); },
 
   // M2 neighbour roof: roof slab collider, parapets, curb (+ fallback building)
   neighbourRoof(P, o, J, M) {

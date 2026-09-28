@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { clamp } from './util/math.js';
+import { SITE } from './config.js';
 
 // Camera rig shared by every machine. The host calls attach(machine.cameraRig())
 // when the active machine changes, setModes(machine.cameraModes()) whenever the
@@ -26,6 +27,14 @@ const CHASE = { back: 16, up: 7, ahead: 4 }; // §8.7 / CAMERAS.chase
 const SETUP = { eye: 1.7, dist: 6 }; // §8.7 / CAMERAS.setup
 const CAB_TILT_RATE = 5 * Math.PI / 180; // rad/s, hydraulic cab tilt
 const CINE_TIME = 14; // s of scripted orbit before handing over to the free orbit
+const CINE_HANDOFF_MAX = 28; // m: the free orbit takes over at most this far from the wreck
+const EMPTY_HOOK_PITCH = 0.3; // rad: mobile cab auto-look stops rising here with no load on the hook
+// signaller (ground) camera on a mobile machine: stands inside the site fence, clear of
+// colliders and the carrier, with a clear line of sight to the load / hook (§8.7)
+const GROUND = {
+  eye: 1.7, fenceMargin: 2.5, carrierClear: 9, minDist: 8, maxDist: 34, recheck: 0.5,
+  dists: [14, 18, 11, 24], offsDeg: [75, -75, 105, -105, 45, -45, 135, -135, 160, -160, 20, -20],
+};
 
 const _v = new THREE.Vector3();
 const _w = new THREE.Vector3();
@@ -39,6 +48,18 @@ const _q = new THREE.Quaternion();
 const UP = new THREE.Vector3(0, 1, 0);
 const _m = new THREE.Matrix4();
 const wrapPi = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+// point (x, y, z) inside an enabled collider box grown by `pad` in XZ (Box yaw convention of collide.js)
+function inAnyBox(boxes, x, y, z, pad = 0, skip = null) {
+  for (let i = 0; i < boxes.length; i++) {
+    const b = boxes[i];
+    if (!b.enabled || b === skip || y < b.cy - b.hy || y > b.cy + b.hy) continue;
+    const dx = x - b.cx, dz = z - b.cz;
+    if (dx * dx + dz * dz > (b.r + pad) * (b.r + pad)) continue;
+    const lx = dx * b.c - dz * b.s, lz = dx * b.s + dz * b.c;
+    if (Math.abs(lx) <= b.hx + pad && Math.abs(lz) <= b.hz + pad) return true;
+  }
+  return false;
+}
 
 export class CameraRig {
   constructor(renderer, parts) {
@@ -305,6 +326,11 @@ export class CameraRig {
     if (!machine && !rig) return;
     if (machine && rig?.focus) rig.focus(focus);
     const now = performance.now() / 1000;
+    if (machine) {
+      this._world = machine.ctx?.world || null;
+      this._loaded = !!machine.hoist?.load;
+      this._skipBox = machine.hoist?.load?.box || null; // the load itself never blocks the view of it
+    }
 
     // machine state: overturn cinematic, tipping rumble
     const mm = machine ? machine.mode : null;
@@ -313,6 +339,8 @@ export class CameraRig {
       this._machineMode = mm;
     }
     if (mm === 'OVERTURNED' && !this._cineDone && !this.cine) this._startCinematic(rig, focus);
+    // the wreck was reset (Retry / Next job / free play) while the replay still ran: drop it
+    if (this.mode === 'cinematic' && mm !== 'OVERTURNED') this._abortCinematic();
     if (mm === 'TIPPING') this.shake(0.006);
     if (this.mode !== 'cinematic' && this.modes && !this.modes.includes(this.mode)) this.setMode(this.modes[0]);
     if (this.mode === 'driver' && !this.driverPivot.parent) this.setMode(this.modes?.[0] || 'cab');
@@ -323,7 +351,7 @@ export class CameraRig {
       case 'chase': this._updateChase(dt, rig, focus, now); break;
       case 'setup': this._updateSetup(dt, rig, focus); break;
       case 'orbit': this._updateOrbit(dt, focus); break;
-      case 'ground': this._updateGround(focus); break;
+      case 'ground': this._updateGround(focus, rig, now); break;
       case 'cinematic': this._updateCinematic(dt); break;
       default: break; // hook: fixed to its mount
     }
@@ -346,8 +374,11 @@ export class CameraRig {
       const tyaw = Math.atan2(-local.x, -local.z);
       const tpitch = Math.atan2(local.y, Math.hypot(local.x, local.z));
       const k = 1 - Math.exp(-dt * 1.6);
+      // mobile: an empty hook hangs just under the boom head — following it up leaves only sky
+      // in view, so the eye stays low enough to keep the ground (loads, truck, lay-down) in view
+      const upMax = this.rig?.carrier && !this._loaded ? Math.min(lim.autoPitchMax, EMPTY_HOOK_PITCH) : lim.autoPitchMax;
       this.yaw += (clamp(wrapPi(tyaw), -lim.yawMax, lim.yawMax) - this.yaw) * k;
-      this.pitch += (clamp(tpitch, lim.pitchMin, lim.autoPitchMax) - this.pitch) * k;
+      this.pitch += (clamp(tpitch, lim.pitchMin, upMax) - this.pitch) * k;
     }
     this.head.rotation.set(this.pitch, this.yaw, 0);
   }
@@ -438,10 +469,18 @@ export class CameraRig {
     this.controls.update();
   }
 
-  _updateGround(focus) {
+  _updateGround(focus, rig, now = 0) {
     const flat = _v.set(focus.x, 0, focus.z);
     const dist = flat.distanceTo(_w.set(this.groundSpot.x, 0, this.groundSpot.z));
-    if (dist > 34 || dist < 8) {
+    if (rig && (rig.carrier || rig.groundSpot)) {
+      // mobile: a signaller position on the site side with a view of the load (the tower keeps its spot logic)
+      let bad = this._snap || dist > GROUND.maxDist || dist < GROUND.minDist;
+      if (!bad && now - (this._groundCheck || 0) > GROUND.recheck) {
+        this._groundCheck = now;
+        bad = !this._groundSpotOk(this.groundSpot.x, this.groundSpot.z, focus, rig);
+      }
+      if (bad) this._pickGroundSpot(focus, rig, now);
+    } else if (dist > 34 || dist < 8) {
       const dir = flat.clone().setY(0).normalize();
       if (dir.lengthSq() < 0.1) dir.set(1, 0, 0);
       const side = new THREE.Vector3(-dir.z, 0, dir.x);
@@ -451,6 +490,58 @@ export class CameraRig {
     this.groundCam.lookAt(focus);
     this.groundCam.rotateY(this.groundYawOff);
     this.groundCam.rotateX(this.groundPitchOff);
+  }
+
+  // candidate spots around the focus, beside the line to the carrier first (load in front, crane
+  // behind); rig.groundSpot(out, focus) may propose a preferred one
+  _pickGroundSpot(focus, rig, now = 0) {
+    this._groundCheck = now;
+    const C = _c, fwd = _d;
+    const hasCarrier = this._carrierPose(rig, C, fwd);
+    if (rig.groundSpot) {
+      const p = rig.groundSpot(_t, focus);
+      if (p && this._groundSpotOk(p.x, p.z, focus, rig, hasCarrier ? C : null)) { this.groundSpot.set(p.x, GROUND.eye, p.z); return; }
+    }
+    let base;
+    if (hasCarrier && Math.hypot(C.x - focus.x, C.z - focus.z) > 2) base = Math.atan2(C.z - focus.z, C.x - focus.x);
+    else if (hasCarrier) base = Math.atan2(fwd.z, fwd.x) + Math.PI;
+    else base = Math.atan2(-focus.z, -focus.x); // toward the site centre
+    for (const d of GROUND.dists) {
+      for (const o of GROUND.offsDeg) {
+        const a = base + (o * Math.PI) / 180;
+        const x = focus.x + Math.cos(a) * d, z = focus.z + Math.sin(a) * d;
+        if (this._groundSpotOk(x, z, focus, rig, hasCarrier ? C : null)) { this.groundSpot.set(x, GROUND.eye, z); return; }
+      }
+    }
+    // nothing clear: a point inside the fence on the site-centre side (re-checked less often)
+    this._groundCheck = now + 2.5;
+    const F = SITE.fence, m = GROUND.fenceMargin;
+    const a = Math.atan2(-focus.z, -focus.x);
+    this.groundSpot.set(
+      clamp(focus.x + Math.cos(a) * 14, F.minX + m, F.maxX - m), GROUND.eye,
+      clamp(focus.z + Math.sin(a) * 14, F.minZ + m, F.maxZ - m),
+    );
+  }
+
+  _groundSpotOk(x, z, focus, rig, carrierPos) {
+    const F = SITE.fence, m = GROUND.fenceMargin;
+    if (x < F.minX + m || x > F.maxX - m || z < F.minZ + m || z > F.maxZ - m) return false;
+    let C = carrierPos;
+    if (C === undefined) C = this._carrierPose(rig, _e, _l) ? _e : null;
+    if (C && Math.hypot(x - C.x, z - C.z) < GROUND.carrierClear) return false;
+    const boxes = this._world?.boxes;
+    if (!boxes || !boxes.length) return true;
+    const y = GROUND.eye;
+    // standing spot free, then the sight line to the focus (last 1.5 m = the load itself)
+    const dx = focus.x - x, dy = focus.y - y, dz = focus.z - z;
+    const len = Math.hypot(dx, dy, dz);
+    const n = Math.max(2, Math.ceil(len / 1.2));
+    const stop = Math.max(0, 1 - 1.5 / Math.max(len, 1e-3));
+    for (let i = 0; i <= n; i++) {
+      const t = (i / n) * stop;
+      if (inAnyBox(boxes, x + dx * t, i === 0 ? 0.6 : y + dy * t, z + dz * t, i === 0 ? 1.2 : 0, this._skipBox)) return false;
+    }
+    return true;
   }
 
   // ------------------------------------------------------------- overturn cinematic
@@ -482,16 +573,31 @@ export class CameraRig {
     this._cineDone = true;
     this._userOrbit = false;
     if (c) {
-      // hand the shot over to the free orbit without a jump
-      this.orbitCam.position.copy(this.cineCam.position);
+      // hand the shot over to the free orbit on the same bearing, but close enough to see the wreck
       this.controls.target.set(c.center.x, c.center.y + 3, c.center.z);
       this.followTarget.copy(this.controls.target);
+      const off = _v.subVectors(this.cineCam.position, this.controls.target);
+      const len = off.length();
+      if (len > CINE_HANDOFF_MAX) off.multiplyScalar(CINE_HANDOFF_MAX / len);
+      off.y = Math.max(off.y, 6);
+      this.orbitCam.position.copy(this.controls.target).add(off);
     }
     if (this.mode === 'cinematic') {
       this.mode = 'orbit';
       this.controls.enabled = true;
       this.active = this.orbitCam;
     }
+  }
+
+  /** Drop a running overturn replay at once (the machine was reset): back to the default camera. */
+  _abortCinematic() {
+    this.cine = null;
+    this._cineDone = false;
+    this._userOrbit = false;
+    this._orbitRecenter = true; // the free orbit re-frames the machine where it now is
+    this.mode = '';
+    this.setMode(this.modes?.[0] || 'cab');
+    if (!this.mode) this.setMode('orbit');
   }
 
   _applyShake(dt) {
